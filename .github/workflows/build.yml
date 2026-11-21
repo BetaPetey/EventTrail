@@ -1,0 +1,136 @@
+# Builds the release jar from a fresh checkout with the README's command, on every push and pull request (any
+# branch). Read-only repository access, no secrets, and every action pinned by its full commit sha.
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate the Gradle wrapper jar against Gradle's published checksums
+        uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Check the wrapper jar is the Gradle 9.2.1 wrapper
+        run: |
+          echo "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9  gradle/wrapper/gradle-wrapper.jar" | sha256sum --check --strict
+
+      # The exact Temurin build of the release gate's JDK, always downloaded, checksum and signature enforced.
+      - name: Set up JDK 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21.0.12.1+1'
+          force-download: true
+          verify-signature: true
+
+      - name: Require dependency verification
+        run: |
+          test -f gradle/verification-metadata.xml
+          grep -Eq '^[[:space:]]*<verify-metadata>true</verify-metadata>[[:space:]]*$' gradle/verification-metadata.xml
+          if grep -q 'org.gradle.dependency.verification' gradle.properties; then
+            echo "gradle.properties must not set the dependency verification mode"
+            exit 1
+          fi
+
+      - name: Build (the README command)
+        run: ./gradlew build
+
+      # The results are notice annotations, so they can be read through the check run's annotations. The jar's
+      # sha256; then its entries by the release gate's entry rule: each entry name with the sha256 of its bytes (times
+      # and attributes ignored, a repeated name fails), one "name sha256" line per entry in sorted name order, and the
+      # sha256 of those UTF-8 lines; then the entry hash list by folder ("folder/ count sha256" of that folder's
+      # lines), which shows where the entries differ when the jar's bytes are not reproduced. The full per-entry
+      # list ("sha256  name" per entry) is always printed to this step's log as plain lines, with workflow commands
+      # stopped around it, since the workflow cannot know whether the build reproduced.
+      - name: Print the jar's sha256 and entry hashes
+        id: jar
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(build/libs/*)
+          jars=(build/libs/*.jar)
+          if [ "${#files[@]}" -ne 1 ] || [ "${#jars[@]}" -ne 1 ]; then
+            echo "::error title=one-jar::expected one file in build/libs, a jar; found ${#files[@]} files, ${#jars[@]} jars"
+            ls -la build/libs || true
+            exit 1
+          fi
+          jar="${jars[0]}"
+          list="$RUNNER_TEMP/jar-entries.txt"
+          notes="$RUNNER_TEMP/jar-entry-folders.txt"
+          log="$RUNNER_TEMP/jar-entry-list.txt"
+          sha="$(sha256sum "$jar" | cut -d ' ' -f 1)"
+          entries="$(python3 -I -c '
+          import hashlib, posixpath, sys, zipfile
+          out = {}
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for info in z.infolist():
+                  if info.filename in out:
+                      raise SystemExit("repeated entry name in the jar")
+                  out[info.filename] = hashlib.sha256(z.read(info)).hexdigest()
+          names = sorted(out)
+          lines = ["%s %s\n" % (name, out[name]) for name in names]
+          text = "".join(lines)
+          with open(sys.argv[2], "w", encoding="utf-8", newline="\n") as handle:
+              handle.write(text)
+          folders = {}
+          for name, line in zip(names, lines):
+              folders.setdefault(posixpath.dirname(name.rstrip("/")) + "/", []).append(line)
+          rows = ["%s %d %s" % (f, len(folders[f]), hashlib.sha256("".join(folders[f]).encode("utf-8")).hexdigest())
+                  for f in sorted(folders)]
+          chunks = [[]]
+          for row in rows:
+              if chunks[-1] and len("\n".join(chunks[-1] + [row])) > 3000:
+                  chunks.append([])
+              chunks[-1].append(row)
+          with open(sys.argv[3], "w", encoding="utf-8", newline="\n") as handle:
+              for i, chunk in enumerate(chunks, 1):
+                  message = "\n".join(chunk).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  handle.write("::notice title=jar-entry-folders-%d-of-%d::%s\n" % (i, len(chunks), message))
+          with open(sys.argv[4], "w", encoding="utf-8", newline="\n") as handle:
+              handle.write("".join("%s  %s\n" % (out[name], name) for name in names))
+          print(hashlib.sha256(text.encode("utf-8")).hexdigest())
+          ' "$jar" "$list" "$notes" "$log")"
+          count="$(wc -l < "$list")"
+          java -version
+          echo "commit $GITHUB_SHA"
+          echo "::notice title=jar-sha256::$(basename "$jar") $sha"
+          echo "::notice title=jar-entries-sha256::$entries ($count entries)"
+          cat "$notes"
+          stop="stop-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "jar entries, $count lines of sha256 and name:"
+          echo "::stop-commands::$stop"
+          cat "$log"
+          echo "::$stop::"
+          {
+            echo "commit $GITHUB_SHA"
+            echo
+            echo "jar $(basename "$jar")"
+            echo
+            echo "sha256 $sha"
+            echo
+            echo "entries-sha256 $entries ($count entries; the hash list by folder is in this step's notices, the per-entry list in its log)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "path=$jar" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the jar
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.jar.outputs.path }}
+          archive: false
+          if-no-files-found: error

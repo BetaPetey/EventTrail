@@ -1,0 +1,55 @@
+EventTrail Third-Party Notices
+
+EventTrail-controlled material is Copyright 2026 BetaPetey and is licensed
+under Apache-2.0. The components below are separate third-party works. They
+retain their own licenses and are not relicensed under EventTrail's license.
+Runtime libraries remain separately identifiable nested JARs.
+
+HikariCP 7.0.2
+
+- Copyright (C) 2013, 2014 Brett Wooldridge
+- License: Apache-2.0, provided by the root LICENSE
+- Nested binary: META-INF/jarjar/HikariCP-7.0.2.jar
+
+MySQL Connector/J 26.7.0
+
+- Copyright (c) 2017, 2026, Oracle and/or its affiliates
+- License: GPL-2.0-only with the Universal FOSS Exception 1.0
+- Nested binary: META-INF/jarjar/mysql-connector-j-26.7.0.jar
+- License and bundled attribution text:
+  META-INF/eventtrail/licenses/MySQL-Connector-J-26.7.0-LICENSE.txt
+- Corresponding-source filename: mysql-connector-j-26.7.0.tar.gz
+- Intended permanent repository-relative source path:
+  third-party-sources/mysql-connector-j/26.7.0/mysql-connector-j-26.7.0.tar.gz
+- Source-archive SHA-256:
+  DC2BD098232903C1AF5B6845C3B66388A8BC36E369C5D498CB35A987A341197B
+
+Connector/J is included unmodified. EventTrail uses its classic JDBC driver;
+the Protocol Buffers dependency associated with X DevAPI is excluded. The
+source path above identifies preserved corresponding-source material in the
+current repository; this notice does not claim that a public source URL exists.
+
+PostgreSQL JDBC 42.7.13
+
+- Copyright (c) 1997, PostgreSQL Global Development Group
+- License: BSD-2-Clause (PostgreSQL License)
+- Nested binary: META-INF/jarjar/postgresql-42.7.13.jar
+- License: META-INF/eventtrail/licenses/PostgreSQL.txt
+
+The PostgreSQL JDBC JAR includes OnGres SCRAM and Stringprep components under
+BSD-2-Clause terms. Their texts are preserved at:
+
+- META-INF/eventtrail/licenses/OnGres-SCRAM-BSD-2-Clause.txt
+- META-INF/eventtrail/licenses/OnGres-Stringprep-BSD-2-Clause.txt
+
+SQLite JDBC 3.53.2.1
+
+- Java-wrapper license: Apache-2.0, provided by the root LICENSE
+- Nested binary: META-INF/jarjar/sqlite-jdbc-3.53.2.1.jar
+- Upstream notice: META-INF/eventtrail/licenses/SQLite-NOTICE.txt
+- Zentus-derived code license:
+  META-INF/eventtrail/licenses/SQLite-Zentus-BSD-2-Clause.txt
+
+The bundled SQLite core/native library is public domain as described at
+https://www.sqlite.org/copyright.html. The upstream SQLite JDBC notice also
+identifies its applicable third-party attribution.

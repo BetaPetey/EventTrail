@@ -1,0 +1,59 @@
+# Build and runtime output
+.gradle/
+build/
+out/
+run/
+/logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+javac.*.args
+*.hprof
+hs_err_pid*
+
+# IDE and code-tool folders
+.idea/
+*.iml
+/.project
+/.classpath
+/.settings/
+/bin/
+/.eclipse/
+/.serena/
+/.vscode/
+/.codex/
+/.cursor/
+/common/.project
+/common/.classpath
+/common/.settings/
+/common/bin/
+/common/.eclipse/
+/common/.serena/
+local.properties
+
+# Agent session settings, hooks, rules and runtime files
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.agents/
+.mcp.json
+skills-lock.json
+
+# The internal testing tree, kept in its own repository
+/internal-testing/
+
+# Files and folders with "private" in their name
+*[Pp][Rr][Ii][Vv][Aa][Tt][Ee]*
+
+# Local secrets, server configuration and test runs
+**/eventtrail-server.properties
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*TestRuns*/

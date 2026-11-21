@@ -1,0 +1,8 @@
+// The javac settings every EventTrail project compiles with (restructure M1): the root and :common apply this one
+// script, so the boundary compile and the shipped compile use the same JDK, release and encoding (condition C2).
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}

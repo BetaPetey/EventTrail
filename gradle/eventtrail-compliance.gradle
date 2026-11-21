@@ -1,0 +1,535 @@
+import groovy.json.JsonSlurper
+import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.tasks.bundling.Jar
+import org.gradle.language.jvm.tasks.ProcessResources
+
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
+/*
+ * Keep the production-package boundary intentionally small. Runtime libraries
+ * remain separately identifiable JarJar entries, and every legal resource is
+ * a byte-for-byte repository input. The upstream source archive is verified as
+ * a tracked repository artifact but is deliberately not copied into the mod.
+ */
+def mainJarTask = tasks.named(sourceSets.main.jarTaskName, Jar)
+def productionArchive = mainJarTask.flatMap { it.archiveFile }
+def mysqlSourceArchive = layout.projectDirectory.file(
+        'third-party-sources/mysql-connector-j/26.7.0/mysql-connector-j-26.7.0.tar.gz')
+def mysqlLicenseResource = layout.projectDirectory.file(
+        'src/main/resources/META-INF/eventtrail/licenses/MySQL-Connector-J-26.7.0-LICENSE.txt')
+def mysqlSourceArchiveSize = 4_571_471L
+def mysqlSourceArchiveSha256 =
+        'DC2BD098232903C1AF5B6845C3B66388A8BC36E369C5D498CB35A987A341197B'
+def mysqlSourceRoot = 'mysql-connector-j-26.7.0'
+
+/*
+ * Qualification pack installations and provider observations belong in the
+ * marked external cache, never in Git or the production mod. Keep this guard
+ * deliberately path/content based: reviewed schemas and small synthetic JSON
+ * fixtures remain valid repository inputs, while executable/runtime payloads
+ * and cache state do not.
+ */
+def allowedTrackedBinaryPaths = [
+        'gradle/wrapper/gradle-wrapper.jar',
+        'third-party-sources/mysql-connector-j/26.7.0/mysql-connector-j-26.7.0.tar.gz'
+] as Set
+
+def isForbiddenQualificationPath = { String rawPath ->
+    String path = rawPath.replace('\\', '/').toLowerCase(Locale.ROOT)
+    List<String> segments = path.split('/') as List
+    String name = segments.isEmpty() ? path : segments.last()
+    if (allowedTrackedBinaryPaths.contains(path)) return false
+
+    Set<String> forbiddenSegments = [
+            'templates', 'observations', 'leases', 'runs', 'world', 'logs',
+            'playerdata', 'saves', '.eventtrail-template', '.eventtrail-run'
+    ] as Set
+    Set<String> forbiddenNames = [
+            '.eventtrail-template-cache.json', '.eventtrail-cache-owner.json',
+            'cache-marker.json', 'copying', 'ready', 'ready_to_run',
+            'incomplete', 'latest.log'
+    ] as Set
+    List<String> forbiddenSuffixes = [
+            '.mrpack', '.zip', '.tar', '.tar.gz', '.tgz', '.7z', '.rar', '.jar',
+            '.db', '.sqlite', '.db-shm', '.db-wal', '.log', '.pem', '.key',
+            '.p12', '.pfx', '.jks', '.crt', '.cer'
+    ]
+
+    return segments.any { forbiddenSegments.contains(it) }
+            || forbiddenNames.contains(name)
+            || forbiddenSuffixes.any { name.endsWith(it) }
+            || name.contains('provider-response')
+            || name.contains('freshness-receipt')
+}
+ext.eventTrailIsForbiddenQualificationPath = isForbiddenQualificationPath
+
+def verifyQualificationRepositoryBoundary = tasks.register(
+        'verifyEventTrailQualificationRepositoryBoundary') {
+    group = 'verification'
+    description = 'Rejects tracked external-cache, provider, pack, or runtime payloads.'
+    doLast {
+        List<String> paths = []
+        File gitDirectory = layout.projectDirectory.dir('.git').asFile
+        if (gitDirectory.exists()) {
+            File internalTestingGit = layout.projectDirectory.dir('internal-testing/.git').asFile
+            if (internalTestingGit.isDirectory()
+                    && project.findProperty('eventTrailInternalOverlayApplied') != true) {
+                // Split R without the internal overlay: this listing alone would read EventTrail through the new
+                // .gitignore. Run only inside the outer public-boundary simulation, by its one-use token: the value
+                // from the environment, the file's writer an ancestor of this process.
+                File tokenFile = layout.projectDirectory.file('build/public-boundary-token/token').asFile
+                String given = System.getenv('EVENTTRAIL_BOUNDARY_TOKEN')
+                // T (A1 9 (b) G2): the same value as the overlay's eventTrailBoundaryTokenLifetime (a code test).
+                java.time.Duration boundaryTokenLifetime = java.time.Duration.ofMinutes(60)
+                // The token file (A1 9 (b) G6): exactly value=, pid=, start=, written=, in that order, ASCII, LF,
+                // a final LF, nothing else. Any other form refuses.
+                Map<String, String> token = null
+                if (Files.isRegularFile(tokenFile.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                    String text = new String(Files.readAllBytes(tokenFile.toPath()), StandardCharsets.ISO_8859_1)
+                    java.util.regex.Matcher form = text =~
+                            /\Avalue=([0-9a-f]{32})\npid=([0-9]+)\nstart=([\x21-\x7e]+)\nwritten=([\x21-\x7e]+)\n\z/
+                    if (form.matches()) {
+                        token = [value: form.group(1), pid: form.group(2), start: form.group(3),
+                                 written: form.group(4)]
+                    }
+                }
+                // Its age: written parses as an Instant, is not after now, and now - written < T.
+                boolean fresh = false
+                if (token != null) {
+                    try {
+                        java.time.Instant written = java.time.Instant.parse(token['written'])
+                        java.time.Instant now = java.time.Instant.now()
+                        fresh = !written.isAfter(now)
+                                && java.time.Duration.between(written, now).compareTo(boundaryTokenLifetime) < 0
+                    } catch (java.time.format.DateTimeParseException ignored) {
+                        fresh = false
+                    }
+                }
+                boolean admitted = fresh && given != null && given ==~ /[0-9a-f]{32}/
+                        && MessageDigest.isEqual(given.getBytes(StandardCharsets.UTF_8),
+                        token['value'].getBytes(StandardCharsets.UTF_8))
+                if (admitted) {
+                    admitted = false
+                    def ancestor = ProcessHandle.current().parent()
+                    while (ancestor.isPresent()) {
+                        def started = ancestor.get().info().startInstant()
+                        if (!started.isPresent()) break
+                        if (Long.toString(ancestor.get().pid()) == token['pid']
+                                && started.get().toString() == token['start']) {
+                            admitted = true
+                            break
+                        }
+                        ancestor = ancestor.get().parent()
+                    }
+                }
+                if (!admitted) {
+                    throw new GradleException('PUBLIC_BOUNDARY_SPLIT_R: the public boundary check of a split '
+                            + 'repository runs only inside the outer public-boundary simulation')
+                }
+                Files.delete(tokenFile.toPath())
+            }
+            String executable = System.getProperty('os.name')
+                    .toLowerCase(Locale.ROOT).contains('windows') ? 'git.exe' : 'git'
+            temporaryDir.mkdirs()
+            Process process = new ProcessBuilder(
+                    executable,
+                    '-c',
+                    "safe.directory=${project.projectDir.absolutePath.replace('\\', '/')}",
+                    'ls-files', '--cached', '--others', '--exclude-standard',
+                    '-z')
+                    .directory(project.projectDir)
+                    .redirectErrorStream(true)
+                    .redirectOutput(new File(temporaryDir, 'git-ls-files.bin'))
+                    .start()
+            if (!process.waitFor(30, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                throw new GradleException(
+                        'Timed out while enumerating tracked qualification-boundary paths')
+            }
+            File listing = new File(temporaryDir, 'git-ls-files.bin')
+            byte[] stdout = listing.bytes
+            if (process.exitValue() != 0) {
+                throw new GradleException(
+                        'Could not enumerate tracked qualification-boundary paths: '
+                                + new String(stdout, StandardCharsets.UTF_8).trim())
+            }
+            paths.addAll(new String(stdout, StandardCharsets.UTF_8)
+                    .split('\\u0000')
+                    .findAll { !it.isEmpty() })
+        } else {
+            // GitHub/source archives have no .git directory. Validate their
+            // shipped source tree while excluding generated build roots.
+            fileTree(project.projectDir) {
+                exclude '.gradle/**', 'build/**', 'out/**', 'run/**', 'common/build/**'
+            }.visit { details ->
+                if (!details.directory) paths.add(details.relativePath.pathString)
+            }
+        }
+
+        List<String> forbidden = paths.findAll(isForbiddenQualificationPath)
+        if (!forbidden.isEmpty()) {
+            throw new GradleException(
+                    'Repository contains external-cache, provider, pack, credential, '
+                            + "or generated runtime material: ${forbidden.sort()}")
+        }
+    }
+}
+
+def expectedNestedArtifacts = [
+        'META-INF/jarjar/HikariCP-7.0.2.jar'           :
+                'com.zaxxer:HikariCP:7.0.2',
+        'META-INF/jarjar/mysql-connector-j-26.7.0.jar':
+                'com.mysql:mysql-connector-j:26.7.0',
+        'META-INF/jarjar/postgresql-42.7.13.jar'       :
+                'org.postgresql:postgresql:42.7.13',
+        'META-INF/jarjar/sqlite-jdbc-3.53.2.1.jar'     :
+                'org.xerial:sqlite-jdbc:3.53.2.1'
+]
+def expectedNestedClasses = [
+        'META-INF/jarjar/HikariCP-7.0.2.jar'           :
+                'com/zaxxer/hikari/HikariDataSource.class',
+        'META-INF/jarjar/mysql-connector-j-26.7.0.jar':
+                'com/mysql/cj/jdbc/Driver.class',
+        'META-INF/jarjar/postgresql-42.7.13.jar'       :
+                'org/postgresql/Driver.class',
+        'META-INF/jarjar/sqlite-jdbc-3.53.2.1.jar'     :
+                'org/sqlite/JDBC.class'
+]
+def expectedJarJarMetadata = [
+        [group: 'com.zaxxer', artifact: 'HikariCP', version: '7.0.2',
+         range: '[7.0.2]', path: 'META-INF/jarjar/HikariCP-7.0.2.jar'],
+        [group: 'com.mysql', artifact: 'mysql-connector-j', version: '26.7.0',
+         range: '[26.7.0]', path: 'META-INF/jarjar/mysql-connector-j-26.7.0.jar'],
+        [group: 'org.postgresql', artifact: 'postgresql', version: '42.7.13',
+         range: '[42.7.13]', path: 'META-INF/jarjar/postgresql-42.7.13.jar'],
+        [group: 'org.xerial', artifact: 'sqlite-jdbc', version: '3.53.2.1',
+         range: '[3.25.2,3.54)', path: 'META-INF/jarjar/sqlite-jdbc-3.53.2.1.jar']
+]
+def expectedPackagedResources = [
+        'LICENSE'                                                           :
+                layout.projectDirectory.file('LICENSE'),
+        'THIRD-PARTY-NOTICES'                                               :
+                layout.projectDirectory.file('THIRD-PARTY-NOTICES'),
+        'META-INF/eventtrail/licenses/PostgreSQL.txt'                        :
+                layout.projectDirectory.file(
+                        'src/main/resources/META-INF/eventtrail/licenses/PostgreSQL.txt'),
+        'META-INF/eventtrail/licenses/OnGres-SCRAM-BSD-2-Clause.txt'          :
+                layout.projectDirectory.file(
+                        'src/main/resources/META-INF/eventtrail/licenses/'
+                                + 'OnGres-SCRAM-BSD-2-Clause.txt'),
+        'META-INF/eventtrail/licenses/OnGres-Stringprep-BSD-2-Clause.txt'     :
+                layout.projectDirectory.file(
+                        'src/main/resources/META-INF/eventtrail/licenses/'
+                                + 'OnGres-Stringprep-BSD-2-Clause.txt'),
+        'META-INF/eventtrail/licenses/SQLite-Zentus-BSD-2-Clause.txt'         :
+                layout.projectDirectory.file(
+                        'src/main/resources/META-INF/eventtrail/licenses/'
+                                + 'SQLite-Zentus-BSD-2-Clause.txt'),
+        'META-INF/eventtrail/licenses/SQLite-NOTICE.txt'                     :
+                layout.projectDirectory.file(
+                        'src/main/resources/META-INF/eventtrail/licenses/SQLite-NOTICE.txt'),
+        'META-INF/eventtrail/licenses/MySQL-Connector-J-26.7.0-LICENSE.txt'  :
+                mysqlLicenseResource
+]
+
+def sha256Stream = { InputStream input ->
+    MessageDigest digest = MessageDigest.getInstance('SHA-256')
+    byte[] buffer = new byte[8192]
+    int count
+    while ((count = input.read(buffer)) >= 0) {
+        if (count > 0) digest.update(buffer, 0, count)
+    }
+    digest.digest().collect { String.format('%02X', it) }.join()
+}
+
+def verifyMysqlSourceArchive = tasks.register('verifyMySqlConnectorSourceArchive') {
+    group = 'verification'
+    description = 'Verifies the exact tracked MySQL Connector/J source archive and license.'
+    inputs.file(mysqlSourceArchive)
+    inputs.file(mysqlLicenseResource)
+    doLast {
+        File source = mysqlSourceArchive.asFile
+        if (!Files.isRegularFile(source.toPath(), LinkOption.NOFOLLOW_LINKS)
+                || source.length() != mysqlSourceArchiveSize) {
+            throw new GradleException(
+                    'MySQL Connector/J source archive is missing or has an unexpected size')
+        }
+        String actualSha
+        source.withInputStream { input -> actualSha = sha256Stream(input) }
+        if (!mysqlSourceArchiveSha256.equalsIgnoreCase(actualSha)) {
+            throw new GradleException('MySQL Connector/J source archive SHA-256 mismatch')
+        }
+
+        Set<String> requiredEntries = [
+                mysqlSourceRoot + '/LICENSE',
+                mysqlSourceRoot + '/build.xml',
+                mysqlSourceRoot + '/src/main/core-api/java/com/mysql/cj/CharsetMapping.java'
+        ] as Set
+        Set<String> observed = [] as Set
+        tarTree(resources.gzip(source)).visit { details ->
+            String path = details.relativePath.pathString
+            if (requiredEntries.contains(path)) observed.add(path)
+        }
+        if (observed != requiredEntries) {
+            throw new GradleException(
+                    "MySQL Connector/J source archive is missing required source/build material; "
+                            + "found ${observed.sort()}")
+        }
+
+        File archiveLicense = tarTree(resources.gzip(source))
+                .matching { include mysqlSourceRoot + '/LICENSE' }
+                .singleFile
+        if (!Arrays.equals(archiveLicense.bytes, mysqlLicenseResource.asFile.bytes)) {
+            throw new GradleException(
+                    'Repository MySQL Connector/J license does not match the source archive')
+        }
+    }
+}
+
+def replaceProperties = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version            : neo_version,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_authors            : mod_authors,
+        mod_license            : mod_license,
+        mod_third_party_notice : providers.gradleProperty('mod_third_party_notice')
+                .orElse('Bundled third-party components retain their own licenses; '
+                        + 'see THIRD-PARTY-NOTICES').get(),
+        mod_version            : mod_version
+]
+
+tasks.named(sourceSets.main.processResourcesTaskName, ProcessResources).configure {
+    dependsOn verifyMysqlSourceArchive
+    inputs.properties replaceProperties
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    from(layout.projectDirectory.file('LICENSE'))
+    from(layout.projectDirectory.file('THIRD-PARTY-NOTICES'))
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand replaceProperties
+    }
+}
+
+mainJarTask.configure {
+    reproducibleFileOrder = true
+    preserveFileTimestamps = false
+    includeEmptyDirs = false
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+}
+
+def verifyReleasePackage = tasks.register('verifyEventTrailReleasePackage') {
+    group = 'verification'
+    description = 'Verifies the exact four-JAR EventTrail production package boundary.'
+    dependsOn mainJarTask
+    dependsOn verifyMysqlSourceArchive
+    inputs.file(productionArchive)
+    inputs.files(configurations.jarJar)
+    inputs.files(expectedPackagedResources.values())
+    inputs.file(layout.projectDirectory.file('gradle.properties'))
+    doLast {
+        File archive = productionArchive.get().asFile
+        if (!Files.isRegularFile(archive.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            throw new GradleException('EventTrail production JAR is missing')
+        }
+
+        Properties projectProperties = new Properties()
+        layout.projectDirectory.file('gradle.properties').asFile.withInputStream {
+            projectProperties.load(it)
+        }
+        if (projectProperties.getProperty('mod_license') != 'Apache-2.0'
+                || projectProperties.getProperty('mod_authors') != 'BetaPetey') {
+            throw new GradleException(
+                    'EventTrail project metadata must identify Apache-2.0 and BetaPetey')
+        }
+
+        def resolvedArtifacts = configurations.jarJar.resolvedConfiguration.resolvedArtifacts
+        Map<String, File> artifactsByCoordinate = resolvedArtifacts.collectEntries { artifact ->
+            def id = artifact.moduleVersion.id
+            [("${id.group}:${id.name}:${id.version}".toString()): artifact.file]
+        }
+        if (artifactsByCoordinate.keySet() != expectedNestedArtifacts.values() as Set) {
+            throw new GradleException(
+                    "JarJar resolved an unexpected runtime dependency set: "
+                            + "${artifactsByCoordinate.keySet().sort()}")
+        }
+
+        new ZipFile(archive).withCloseable { zip ->
+            List<String> paths = zip.entries().collect { it.name }
+            Set<String> duplicatePaths = paths.groupBy { it }.findAll {
+                ignored, occurrences -> occurrences.size() != 1
+            }.keySet()
+            if (!duplicatePaths.isEmpty()) {
+                throw new GradleException(
+                        "EventTrail production JAR contains duplicate entries: ${duplicatePaths.sort()}")
+            }
+
+            Set<String> nestedJars = paths.findAll { it.endsWith('.jar') } as Set
+            if (nestedJars != expectedNestedArtifacts.keySet()) {
+                throw new GradleException(
+                        "EventTrail production JAR must contain exactly "
+                                + "${expectedNestedArtifacts.keySet().sort()}; "
+                                + "found ${nestedJars.sort()}")
+            }
+
+            Set<String> expectedLicenseEntries = expectedPackagedResources.keySet()
+                    .findAll { it.startsWith('META-INF/eventtrail/licenses/') } as Set
+            Set<String> actualLicenseEntries = paths.findAll {
+                it.startsWith('META-INF/eventtrail/licenses/') && !it.endsWith('/')
+            } as Set
+            if (actualLicenseEntries != expectedLicenseEntries) {
+                throw new GradleException(
+                        "EventTrail production JAR must contain exactly the required license "
+                                + "resources ${expectedLicenseEntries.sort()}; "
+                                + "found ${actualLicenseEntries.sort()}")
+            }
+
+            Set<String> exactOuterResources = [
+                    'META-INF/MANIFEST.MF',
+                    'META-INF/neoforge.mods.toml',
+                    'META-INF/jarjar/metadata.json',
+                    'LICENSE',
+                    'THIRD-PARTY-NOTICES',
+                    'eventtrail.mixins.json',
+                    'eventtrail-compat.mixins.json'
+            ] as Set
+            exactOuterResources.addAll(expectedNestedArtifacts.keySet())
+            exactOuterResources.addAll(expectedPackagedResources.keySet())
+            List<String> unexpectedOuterEntries = paths.findAll { path ->
+                if (path.endsWith('/')) return false
+                if (path.startsWith('io/github/betapetey/eventtrail/')
+                        && path.endsWith('.class')) return false
+                return !exactOuterResources.contains(path)
+            }
+            if (!unexpectedOuterEntries.isEmpty()) {
+                throw new GradleException(
+                        'EventTrail production JAR contains an unreviewed outer entry; '
+                                + 'qualification/cache/provider/runtime inputs are never package '
+                                + "surfaces: ${unexpectedOuterEntries.sort()}")
+            }
+
+            def entryBytes = { String path ->
+                def entry = zip.getEntry(path)
+                if (entry == null) {
+                    throw new GradleException("EventTrail production JAR is missing ${path}")
+                }
+                zip.getInputStream(entry).withCloseable { it.readAllBytes() }
+            }
+
+            expectedNestedArtifacts.each { nestedPath, coordinate ->
+                byte[] nestedBytes = entryBytes(nestedPath)
+                if (!Arrays.equals(artifactsByCoordinate[coordinate].bytes, nestedBytes)) {
+                    throw new GradleException(
+                            "${nestedPath} differs from the exact Gradle-resolved ${coordinate}")
+                }
+
+                boolean found = false
+                new ZipInputStream(new ByteArrayInputStream(nestedBytes)).withCloseable { nested ->
+                    def entry
+                    while (!found && (entry = nested.nextEntry) != null) {
+                        found = entry.name == expectedNestedClasses[nestedPath]
+                    }
+                }
+                if (!found) {
+                    throw new GradleException(
+                            "${nestedPath} does not contain ${expectedNestedClasses[nestedPath]}")
+                }
+            }
+
+            byte[] metadataBytes = entryBytes('META-INF/jarjar/metadata.json')
+            def metadata = new JsonSlurper().parse(metadataBytes)
+            if (!(metadata instanceof Map) || !(metadata.jars instanceof List)
+                    || metadata.jars.size() != expectedJarJarMetadata.size()) {
+                throw new GradleException('JarJar metadata has an unexpected structure')
+            }
+            List<Map<String, Object>> actualMetadata = metadata.jars.collect { row ->
+                [group: row.identifier?.group, artifact: row.identifier?.artifact,
+                 version: row.version?.artifactVersion, range: row.version?.range,
+                 path: row.path, isObfuscated: row.isObfuscated]
+            }
+            List<Map<String, Object>> expectedMetadata = expectedJarJarMetadata.collect { row ->
+                row + [isObfuscated: false]
+            }
+            if ((actualMetadata as Set) != (expectedMetadata as Set)
+                    || actualMetadata.size() != (actualMetadata as Set).size()) {
+                throw new GradleException(
+                        "JarJar metadata does not describe the exact four dependencies: "
+                                + "${actualMetadata}")
+            }
+
+            expectedPackagedResources.each { packagedPath, repositoryFile ->
+                if (!Arrays.equals(repositoryFile.asFile.bytes, entryBytes(packagedPath))) {
+                    throw new GradleException(
+                            "Packaged resource ${packagedPath} differs from its repository input")
+                }
+            }
+
+            List<String> forbidden = paths.findAll { path ->
+                path == 'NOTICE'
+                        || path.startsWith('META-INF/eventtrail/sources/')
+                        || path.startsWith('META-INF/sbom/')
+                        || path == 'META-INF/eventtrail/licenses/manifest.json'
+                        || path.startsWith('com/google/protobuf/')
+                        || path.startsWith('com/mysql/cj/')
+                        || path.startsWith('com/zaxxer/hikari/')
+                        || path.startsWith('org/mariadb/')
+                        || path.startsWith('org/postgresql/')
+                        || path.startsWith('io/opentelemetry/')
+                        || path.contains('opentelemetry-')
+                         || path.startsWith('org/sqlite/')
+                         || path.startsWith('io/github/betapetey/eventtrail/auditruntime/')
+                         || path.startsWith('io/github/betapetey/eventtrail/clientaudit/')
+                         || path.startsWith('io/github/betapetey/eventtrail/compliance/')
+                         || path.startsWith('io/github/betapetey/eventtrail/relink/')
+                         || path.startsWith('assets/eventtrail_audit_test/')
+                         || path.startsWith('data/eventtrail_audit_test/')
+                         || path.startsWith('internal-testing/')
+                        || path.contains('protobuf-java')
+                        || path.contains('mariadb-java-client')
+                        || path.contains('eventtrail-jdbc-tls-plugin')
+                        || (!expectedNestedArtifacts.containsKey(path)
+                                && isForbiddenQualificationPath(path))
+            }
+            if (!forbidden.isEmpty()) {
+                throw new GradleException(
+                        "EventTrail production JAR contains a forbidden flattened, helper, "
+                                + "or obsolete package surface: ${forbidden.sort()}")
+            }
+
+            String modsToml = new String(
+                    entryBytes('META-INF/neoforge.mods.toml'), StandardCharsets.UTF_8)
+            if (!modsToml.contains('license="Apache-2.0"')
+                    || !modsToml.contains('authors="BetaPetey"')
+                    || modsToml.contains('${')) {
+                throw new GradleException(
+                        'Packaged NeoForge metadata has incorrect or unexpanded rights metadata')
+            }
+
+            String archiveSha
+            archive.withInputStream { input -> archiveSha = sha256Stream(input) }
+            List<String> selfHashSurfaces = [
+                    'META-INF/MANIFEST.MF',
+                    'META-INF/neoforge.mods.toml'
+            ] + expectedPackagedResources.keySet()
+            if (selfHashSurfaces.any { path ->
+                new String(entryBytes(path), StandardCharsets.UTF_8)
+                        .toUpperCase(Locale.ROOT).contains(archiveSha)
+            }) {
+                throw new GradleException(
+                        'EventTrail production JAR must not embed its own archive hash')
+            }
+        }
+    }
+}
+
+tasks.named('check').configure {
+    dependsOn verifyReleasePackage
+    dependsOn verifyQualificationRepositoryBoundary
+}

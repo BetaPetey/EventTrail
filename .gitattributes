@@ -1,0 +1,8 @@
+# Line endings (item 21i): commit and check out text files with LF so that a clone on any platform builds the same
+# bytes as the committed blobs; .bat files stay CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.gz binary
+*.png binary
+compat/mod-folders.tsv text eol=lf

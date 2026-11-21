@@ -1,0 +1,39 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "io.github.betapetey.eventtrail.mixin",
+  "plugin": "io.github.betapetey.eventtrail.mixin.EventTrailMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "AbstractContainerMenuItemOverrideMixin",
+    "ArsEngineCreditMixin",
+    "BeingHurtStackMixin",
+    "CommandEngineCreditMixin",
+    "CommandExecutionScopeMixin",
+    "CommonHooksMixin",
+    "CompoundContainerAccessor",
+    "ExplosionMixin",
+    "FakePlayerAttackScopeMixin",
+    "FakePlayerEngineCreditMixin",
+    "ItemEntityMixin",
+    "IronsEngineCreditMixin",
+    "LivingEntityDeathMixin",
+    "PlayerActionScopeChunkTaskMixin",
+    "PlayerActionScopeInteractMixin",
+    "PlayerActionScopeLevelMixin",
+    "PlayerActionScopeMoveVehicleMixin",
+    "PlayerActionScopeNeighbourMixin",
+    "PlayerActionScopeSteeredMixin",
+    "PrimedTntActionEvidenceMixin",
+    "ProjectileActionEvidenceMixin",
+    "RetaliationScopeMixin",
+    "ServerGamePacketListenerImplMixin",
+    "ServerPlayerBeingHurtMixin",
+    "ServerPlayerDeathMixin",
+    "ServerPlayerGameModeMixin",
+    "TntBlockActionEvidenceMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

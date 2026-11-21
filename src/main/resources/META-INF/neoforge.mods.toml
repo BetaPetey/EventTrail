@@ -1,0 +1,36 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="${mod_authors}"
+description='''
+Server-side audit, logging, and investigation for Minecraft 1.21.1 NeoForge.
+Records world and player activity with inspect and structured lookup tools and
+supports SQLite, MySQL, and PostgreSQL storage. EventTrail does not perform
+world rollback or restoration.
+${mod_third_party_notice}
+'''
+
+[[mixins]]
+config="eventtrail.mixins.json"
+
+[[mixins]]
+config="eventtrail-compat.mixins.json"
+
+[[dependencies.${mod_id}]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.221,21.2)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+type="required"
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"

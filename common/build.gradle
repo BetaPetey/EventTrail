@@ -1,0 +1,39 @@
+// EventTrail's platform-neutral code (restructure M1). This project only compiles common/src/main/java ALONE, as
+// the boundary check: a reference from here to Minecraft, NeoForge, Mixin or a mod fails this compile. The shipped
+// classes come from the root project, which compiles these sources in its one javac run; nothing here is packaged.
+plugins {
+    id 'java-library'
+}
+
+apply from: rootProject.file('gradle/eventtrail-java-conventions.gradle')
+
+// The public-boundary simulation build keeps this project's output away from the live common/build.
+if (providers.gradleProperty('eventtrailBoundaryBuildDir').isPresent()) {
+    layout.buildDirectory = rootProject.layout.projectDirectory.dir(
+            providers.gradleProperty('eventtrailBoundaryBuildDir').get() + '/common')
+}
+
+dependencies {
+    // Exactly the root's own resolved asm, asm-tree, log4j-api and jna (byte-identity condition C3): no repository and
+    // no version is declared here. The root's syncEventTrailCommonLibraries copies them and fails on any other set.
+    compileOnly files({
+        rootProject.layout.buildDirectory.dir('eventtrail-common-libraries').get().asFileTree.matching {
+            include '*.jar'
+        }
+    }).builtBy(':syncEventTrailCommonLibraries')
+}
+
+tasks.named('compileJava') {
+    def resources = layout.projectDirectory.dir('src/main/resources').asFile
+    doFirst {
+        // Byte-identity condition C4: the shipped jar takes every resource from the root's src/main/resources.
+        if (resources.exists() && !fileTree(resources).isEmpty()) {
+            throw new GradleException(':common must not hold resources: ' + resources)
+        }
+    }
+}
+
+// Nothing of :common is published or packaged on its own.
+tasks.named('jar') {
+    enabled = false
+}
