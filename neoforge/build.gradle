@@ -661,9 +661,9 @@ tasks.named('compileJava') {
     source(project(':common').sourceSets.main.java)
 }
 
-// Restructure M2 (item 21h): every compat/<folder>/src/main/java joins the root's main source set, in one sorted glob
+// Restructure M2 (item 21h): every adapters/<folder>/src/main/java joins the root's main source set, in one sorted glob
 // (a '+' in a folder name is kept verbatim), so the root still compiles every source in its one javac run.
-def eventtrailCompatRoots = (rootProject.file('compat').listFiles() ?: new File[0])
+def eventtrailCompatRoots = (rootProject.file('adapters').listFiles() ?: new File[0])
         .findAll { new File(it, 'src/main/java').directory }
         .sort { it.name }
         .collect { new File(it, 'src/main/java') }

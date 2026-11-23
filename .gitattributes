@@ -5,4 +5,4 @@
 *.jar binary
 *.gz binary
 *.png binary
-compat/mod-folders.tsv text eol=lf
+adapters/mod-folders.tsv text eol=lf

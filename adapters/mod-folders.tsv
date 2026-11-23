@@ -1,4 +1,4 @@
-# EventTrail mod-folder table (restructure item 21g). One row per Java source file that M2 moves into compat/<folder>.
+# EventTrail mod-folder table (restructure item 21g). One row per Java source file that M2 moves into adapters/<folder>.
 # Columns are tab-separated: class, folder, mods, kinds. See the folder-check test for the rules.
 class	folder	mods	kinds
 io.github.betapetey.eventtrail.events.gadgets.BuildingGadgetsAuditBridge	gadgets	buildinggadgets2	support
