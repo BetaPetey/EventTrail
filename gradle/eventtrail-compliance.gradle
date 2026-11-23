@@ -19,7 +19,7 @@ import java.util.zip.ZipInputStream
  */
 def mainJarTask = tasks.named(sourceSets.main.jarTaskName, Jar)
 def productionArchive = mainJarTask.flatMap { it.archiveFile }
-def mysqlSourceArchive = layout.projectDirectory.file(
+def mysqlSourceArchive = rootProject.layout.projectDirectory.file(
         'third-party-sources/mysql-connector-j/26.7.0/mysql-connector-j-26.7.0.tar.gz')
 def mysqlLicenseResource = layout.projectDirectory.file(
         'src/main/resources/META-INF/eventtrail/licenses/MySQL-Connector-J-26.7.0-LICENSE.txt')
@@ -75,15 +75,15 @@ def verifyQualificationRepositoryBoundary = tasks.register(
     description = 'Rejects tracked external-cache, provider, pack, or runtime payloads.'
     doLast {
         List<String> paths = []
-        File gitDirectory = layout.projectDirectory.dir('.git').asFile
+        File gitDirectory = rootProject.layout.projectDirectory.dir('.git').asFile
         if (gitDirectory.exists()) {
-            File internalTestingGit = layout.projectDirectory.dir('internal-testing/.git').asFile
+            File internalTestingGit = rootProject.layout.projectDirectory.dir('internal-testing/.git').asFile
             if (internalTestingGit.isDirectory()
                     && project.findProperty('eventTrailInternalOverlayApplied') != true) {
                 // Split R without the internal overlay: this listing alone would read EventTrail through the new
                 // .gitignore. Run only inside the outer public-boundary simulation, by its one-use token: the value
                 // from the environment, the file's writer an ancestor of this process.
-                File tokenFile = layout.projectDirectory.file('build/public-boundary-token/token').asFile
+                File tokenFile = rootProject.layout.projectDirectory.file('build/public-boundary-token/token').asFile
                 String given = System.getenv('EVENTTRAIL_BOUNDARY_TOKEN')
                 // T (A1 9 (b) G2): the same value as the overlay's eventTrailBoundaryTokenLifetime (a code test).
                 java.time.Duration boundaryTokenLifetime = java.time.Duration.ofMinutes(60)
@@ -140,10 +140,10 @@ def verifyQualificationRepositoryBoundary = tasks.register(
             Process process = new ProcessBuilder(
                     executable,
                     '-c',
-                    "safe.directory=${project.projectDir.absolutePath.replace('\\', '/')}",
+                    "safe.directory=${rootProject.projectDir.absolutePath.replace('\\', '/')}",
                     'ls-files', '--cached', '--others', '--exclude-standard',
                     '-z')
-                    .directory(project.projectDir)
+                    .directory(rootProject.projectDir)
                     .redirectErrorStream(true)
                     .redirectOutput(new File(temporaryDir, 'git-ls-files.bin'))
                     .start()
@@ -165,8 +165,8 @@ def verifyQualificationRepositoryBoundary = tasks.register(
         } else {
             // GitHub/source archives have no .git directory. Validate their
             // shipped source tree while excluding generated build roots.
-            fileTree(project.projectDir) {
-                exclude '.gradle/**', 'build/**', 'out/**', 'run/**', 'common/build/**'
+            fileTree(rootProject.projectDir) {
+                exclude '.gradle/**', 'build/**', 'out/**', 'run/**', 'common/build/**', 'neoforge/build/**'
             }.visit { details ->
                 if (!details.directory) paths.add(details.relativePath.pathString)
             }
@@ -213,9 +213,9 @@ def expectedJarJarMetadata = [
 ]
 def expectedPackagedResources = [
         'LICENSE'                                                           :
-                layout.projectDirectory.file('LICENSE'),
+                rootProject.layout.projectDirectory.file('LICENSE'),
         'THIRD-PARTY-NOTICES'                                               :
-                layout.projectDirectory.file('THIRD-PARTY-NOTICES'),
+                rootProject.layout.projectDirectory.file('THIRD-PARTY-NOTICES'),
         'META-INF/eventtrail/licenses/PostgreSQL.txt'                        :
                 layout.projectDirectory.file(
                         'src/main/resources/META-INF/eventtrail/licenses/PostgreSQL.txt'),
@@ -311,8 +311,8 @@ tasks.named(sourceSets.main.processResourcesTaskName, ProcessResources).configur
     dependsOn verifyMysqlSourceArchive
     inputs.properties replaceProperties
     duplicatesStrategy = DuplicatesStrategy.FAIL
-    from(layout.projectDirectory.file('LICENSE'))
-    from(layout.projectDirectory.file('THIRD-PARTY-NOTICES'))
+    from(rootProject.layout.projectDirectory.file('LICENSE'))
+    from(rootProject.layout.projectDirectory.file('THIRD-PARTY-NOTICES'))
     filesMatching('META-INF/neoforge.mods.toml') {
         expand replaceProperties
     }
@@ -333,7 +333,7 @@ def verifyReleasePackage = tasks.register('verifyEventTrailReleasePackage') {
     inputs.file(productionArchive)
     inputs.files(configurations.jarJar)
     inputs.files(expectedPackagedResources.values())
-    inputs.file(layout.projectDirectory.file('gradle.properties'))
+    inputs.file(rootProject.layout.projectDirectory.file('gradle.properties'))
     doLast {
         File archive = productionArchive.get().asFile
         if (!Files.isRegularFile(archive.toPath(), LinkOption.NOFOLLOW_LINKS)) {
@@ -341,7 +341,7 @@ def verifyReleasePackage = tasks.register('verifyEventTrailReleasePackage') {
         }
 
         Properties projectProperties = new Properties()
-        layout.projectDirectory.file('gradle.properties').asFile.withInputStream {
+        rootProject.layout.projectDirectory.file('gradle.properties').asFile.withInputStream {
             projectProperties.load(it)
         }
         if (projectProperties.getProperty('mod_license') != 'Apache-2.0'

@@ -30,6 +30,12 @@ hs_err_pid*
 /common/bin/
 /common/.eclipse/
 /common/.serena/
+/neoforge/.project
+/neoforge/.classpath
+/neoforge/.settings/
+/neoforge/bin/
+/neoforge/.eclipse/
+/neoforge/.serena/
 local.properties
 
 # Agent session settings, hooks, rules and runtime files

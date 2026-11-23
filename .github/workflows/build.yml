@@ -63,10 +63,16 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(build/libs/*)
-          jars=(build/libs/*.jar)
+          files=(neoforge/build/libs/*)
+          jars=(neoforge/build/libs/*.jar)
           if [ "${#files[@]}" -ne 1 ] || [ "${#jars[@]}" -ne 1 ]; then
-            echo "::error title=one-jar::expected one file in build/libs, a jar; found ${#files[@]} files, ${#jars[@]} jars"
+            echo "::error title=one-jar::expected one file in neoforge/build/libs, a jar; found ${#files[@]} files, ${#jars[@]} jars"
+            ls -la neoforge/build/libs || true
+            exit 1
+          fi
+          root=(build/libs/*)
+          if [ "${#root[@]}" -ne 0 ]; then
+            echo "::error title=one-jar::expected no file in build/libs (the root project builds no jar); found ${#root[@]} files"
             ls -la build/libs || true
             exit 1
           fi

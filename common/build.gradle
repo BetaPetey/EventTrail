@@ -15,12 +15,16 @@ if (providers.gradleProperty('eventtrailBoundaryBuildDir').isPresent()) {
 
 dependencies {
     // Exactly the root's own resolved asm, asm-tree, log4j-api and jna (byte-identity condition C3): no repository and
-    // no version is declared here. The root's syncEventTrailCommonLibraries copies them and fails on any other set.
+    // no version is declared here. The platform's syncEventTrailCommonLibraries copies them and fails on any other set,
+    // into the repository root's build/, or into the public-boundary build's own folder (where the root's build folder
+    // was moved before M3).
     compileOnly files({
-        rootProject.layout.buildDirectory.dir('eventtrail-common-libraries').get().asFileTree.matching {
+        (providers.gradleProperty('eventtrailBoundaryBuildDir').isPresent()
+                ? rootProject.layout.projectDirectory.dir(providers.gradleProperty('eventtrailBoundaryBuildDir').get())
+                : rootProject.layout.buildDirectory.get()).dir('eventtrail-common-libraries').asFileTree.matching {
             include '*.jar'
         }
-    }).builtBy(':syncEventTrailCommonLibraries')
+    }).builtBy(':neoforge:syncEventTrailCommonLibraries')
 }
 
 tasks.named('compileJava') {

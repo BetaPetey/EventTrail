@@ -11,3 +11,4 @@ plugins {
 rootProject.name = 'EventTrail-1.21.1-NeoForge-Dev'
 
 include 'common'
+include 'neoforge'

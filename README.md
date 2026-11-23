@@ -199,7 +199,7 @@ Linux and macOS:
 ./gradlew build
 ```
 
-The first build downloads Gradle, NeoForge and the Minecraft development files, so it needs internet access and takes several minutes. The mod jar is written to `build/libs/` as `EventTrail-1.21.1-NeoForge-<mod version>.jar`, and that folder holds only this jar.
+The first build downloads Gradle, NeoForge and the Minecraft development files, so it needs internet access and takes several minutes. The mod jar is written to `neoforge/build/libs/` as `EventTrail-1.21.1-NeoForge-<mod version>.jar`, and that folder holds only this jar.
 
 ## Running a development server
 
