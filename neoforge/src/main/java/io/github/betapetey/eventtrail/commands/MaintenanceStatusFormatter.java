@@ -1,11 +1,12 @@
 package io.github.betapetey.eventtrail.commands;
 
+import io.github.betapetey.eventtrail.commands.presentation.DisplayTimeFormatter;
 import io.github.betapetey.eventtrail.core.EventTrailMaintenance.RetentionSnapshot;
 import io.github.betapetey.eventtrail.storage.RetentionResult;
 import io.github.betapetey.eventtrail.storage.StorageMaintenanceSnapshot;
 import io.github.betapetey.eventtrail.storage.StorageMaintenanceSnapshot.Metric;
 
-import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -19,6 +20,12 @@ final class MaintenanceStatusFormatter {
 
     static List<String> lines(RetentionSnapshot retention, StorageMaintenanceSnapshot storage, long now, boolean detail,
                               boolean reclaimEnabled) {
+        return lines(retention, storage, now, detail, reclaimEnabled, ZoneId.systemDefault());
+    }
+
+    /** Every time shown uses {@link DisplayTimeFormatter} in {@code zone} (Owner Q241 A); stored times are unchanged. */
+    static List<String> lines(RetentionSnapshot retention, StorageMaintenanceSnapshot storage, long now, boolean detail,
+                              boolean reclaimEnabled, ZoneId zone) {
         List<String> lines = new ArrayList<>();
         if (detail) lines.add("§6EventTrail Maintenance Status (cached; read-only)");
         String policy = retention.configuredDays() == 0 ? "disabled (retention.days=0)" : retention.configuredDays() + " days";
@@ -30,8 +37,8 @@ final class MaintenanceStatusFormatter {
         } else {
             lines.add("§7Last retention: §f" + retention.lastResult().outcome() + "; confirmed deleted rows: "
                     + retention.lastResult().deletedCount());
-            lines.add("§7Retention cutoff (strictly older): §f" + Instant.ofEpochMilli(retention.lastCutoffTimestamp())
-                    + " §7Result at: §f" + Instant.ofEpochMilli(retention.completedAtMillis()));
+            lines.add("§7Retention cutoff (strictly older): §f" + DisplayTimeFormatter.format(retention.lastCutoffTimestamp(), zone)
+                    + " §7Result at: §f" + DisplayTimeFormatter.format(retention.completedAtMillis(), zone));
             if (detail) lines.add(retention.lastResult().outcome() == RetentionResult.Outcome.EXHAUSTED
                     ? "§7Backlog: §fNo further expired rows observed at that cutoff; later rows may age into retention"
                     : "§7Backlog: §eExpired rows may remain; no remaining-row count was queried");
@@ -57,7 +64,7 @@ final class MaintenanceStatusFormatter {
         } else {
             lines.add("§7Physical allocation/reclaimable bytes: §eUnavailable; no external allocation queries are issued");
         }
-        lines.add(observation(storage, now));
+        lines.add(observation(storage, now, zone));
         if (detail) {
             lines.addAll(capabilityExplanation(storage));
             var policyFacts = storage.policyStatus();
@@ -90,7 +97,7 @@ final class MaintenanceStatusFormatter {
             if (reclaim == null) {
                 lines.add("§7Last EventTrail reclamation: §eNot run; physical reduction unavailable (not zero-byte success)");
             } else {
-                lines.add("§7Last EventTrail reclamation: §f" + publicDisposition(reclaim.outcome().name()) + " at " + Instant.ofEpochMilli(reclaim.completedAtMillis()));
+                lines.add("§7Last EventTrail reclamation: §f" + publicDisposition(reclaim.outcome().name()) + " at " + DisplayTimeFormatter.format(reclaim.completedAtMillis(), zone));
                 lines.add("§7Released pages: §f" + metric(reclaim.pagesReleased(), false)
                         + " §7Logical page-byte reduction: §f" + metric(reclaim.logicalPageBytesReduced(), true));
                 lines.add("§7Observed main-file reduction: §f" + metric(reclaim.apparentMainFileBytesReduced(), true)
@@ -138,14 +145,15 @@ final class MaintenanceStatusFormatter {
         };
     }
 
-    private static String observation(StorageMaintenanceSnapshot snapshot, long now) {
+    private static String observation(StorageMaintenanceSnapshot snapshot, long now, ZoneId zone) {
         if (snapshot.observation() != StorageMaintenanceSnapshot.Observation.AVAILABLE) {
             return "§7Allocation observation: §e" + snapshot.observation()
-                    + (snapshot.observedAtMillis() == 0L ? "; timestamp unavailable" : " at " + Instant.ofEpochMilli(snapshot.observedAtMillis()))
+                    + (snapshot.observedAtMillis() == 0L ? "; timestamp unavailable"
+                            : " at " + DisplayTimeFormatter.format(snapshot.observedAtMillis(), zone))
                     + "; no freshness or zero-allocation claim";
         }
         long ageSeconds = Math.max(0L, now - snapshot.observedAtMillis()) / 1000L;
-        return "§7Allocation observation: §f" + Instant.ofEpochMilli(snapshot.observedAtMillis())
+        return "§7Allocation observation: §f" + DisplayTimeFormatter.format(snapshot.observedAtMillis(), zone)
                 + " (cached; " + ageSeconds + "s old; not a current-size guarantee)";
     }
 

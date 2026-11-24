@@ -9,7 +9,15 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
-/** Immutable query specification for structured EventTrail lookups. */
+/**
+ * Immutable query specification for structured EventTrail lookups.
+ *
+ * <p>{@code things} holds the lookup command's {@code block:}, {@code item:}, {@code entity:} and {@code mod:}
+ * filters (exact IDs or quoted names; lookup-01 filter track). The older components {@code block},
+ * {@code blockNeedles}, {@code item}, {@code itemNeedles}, {@code entity} and {@code exactName} keep their
+ * contains-match and exact-name meaning for the callers that still build them (the audit gate scenarios and their
+ * tests); the lookup command no longer sets them.</p>
+ */
 public record AdvancedQuery(
         long fromTime,
         long throughTime,
@@ -27,8 +35,33 @@ public record AdvancedQuery(
         ContainerAccessPhase accessPhase,
         int perPage,
         int page,
-        String exactName
+        String exactName,
+        ThingFilters things
 ) {
+    /** A query without thing filters (every caller before the exact block:, item:, entity: and mod: filters). */
+    public AdvancedQuery(
+            long fromTime,
+            long throughTime,
+            long highWaterId,
+            String world,
+            BlockPos center,
+            int radius,
+            String playerName,
+            ActionSelection actionSelection,
+            String block,
+            List<String> blockNeedles,
+            String item,
+            List<String> itemNeedles,
+            String entity,
+            ContainerAccessPhase accessPhase,
+            int perPage,
+            int page,
+            String exactName) {
+        this(fromTime, throughTime, highWaterId, world, center, radius, playerName, actionSelection,
+                block, blockNeedles, item, itemNeedles, entity, accessPhase, perPage, page, exactName,
+                ThingFilters.NONE);
+    }
+
     /** A query without an exact-name filter (every caller before the {@code name:} filter). */
     public AdvancedQuery(
             long fromTime,
@@ -48,7 +81,8 @@ public record AdvancedQuery(
             int perPage,
             int page) {
         this(fromTime, throughTime, highWaterId, world, center, radius, playerName, actionSelection,
-                block, blockNeedles, item, itemNeedles, entity, accessPhase, perPage, page, null);
+                block, blockNeedles, item, itemNeedles, entity, accessPhase, perPage, page, null,
+                ThingFilters.NONE);
     }
 
     public AdvancedQuery {
@@ -71,13 +105,14 @@ public record AdvancedQuery(
         if (exactName != null && exactName.isBlank()) {
             throw new IllegalArgumentException("An exact-name filter needs a name");
         }
+        things = things == null ? ThingFilters.NONE : things;
     }
 
     public AdvancedQuery withHighWaterId(long capturedHighWaterId) {
         return new AdvancedQuery(
                 fromTime, throughTime, capturedHighWaterId, world, center, radius,
                 playerName, actionSelection, block, blockNeedles, item, itemNeedles,
-                entity, accessPhase, perPage, page, exactName);
+                entity, accessPhase, perPage, page, exactName, things);
     }
 
     public AdvancedQuery withPage(int requestedPage) {
@@ -92,7 +127,7 @@ public record AdvancedQuery(
         return new AdvancedQuery(
                 fromTime, throughTime, highWaterId, world, center, radius,
                 playerName, actionSelection, block, blockNeedles, item, itemNeedles,
-                entity, accessPhase, requestedPerPage, requestedPage, exactName);
+                entity, accessPhase, requestedPerPage, requestedPage, exactName, things);
     }
 
     /**

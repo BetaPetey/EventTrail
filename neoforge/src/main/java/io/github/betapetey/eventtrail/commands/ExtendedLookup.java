@@ -17,6 +17,7 @@ import io.github.betapetey.eventtrail.commands.investigation.PlayerInvestigation
 import io.github.betapetey.eventtrail.commands.presentation.AuditActionPresentationCatalog;
 import io.github.betapetey.eventtrail.commands.presentation.AuditEntryPresenter;
 import io.github.betapetey.eventtrail.commands.presentation.AuditResultsComponentRenderer;
+import io.github.betapetey.eventtrail.commands.presentation.DisplayTimeFormatter;
 import io.github.betapetey.eventtrail.commands.presentation.ExplosionVerdicts;
 import io.github.betapetey.eventtrail.commands.presentation.LookupResultsView;
 import io.github.betapetey.eventtrail.commands.presentation.LookupSummaryView;
@@ -52,6 +53,8 @@ import io.github.betapetey.eventtrail.storage.EventTrailQueryException;
 import io.github.betapetey.eventtrail.storage.ILogStorage;
 import io.github.betapetey.eventtrail.storage.StorageMaintenanceSnapshot;
 import io.github.betapetey.eventtrail.storage.StorageTransportSecurity;
+import io.github.betapetey.eventtrail.storage.ThingFilter;
+import io.github.betapetey.eventtrail.storage.ThingFilters;
 import io.github.betapetey.eventtrail.util.DisplayNameResolver;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 import net.minecraft.commands.CommandSourceStack;
@@ -72,6 +75,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -84,6 +88,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.time.Clock;
+import java.time.ZoneId;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -121,7 +126,10 @@ public final class ExtendedLookup {
             .map(action -> "action:" + action.token())
             .toList();
     private static final Set<String> SUPPORTED_LOOKUP_FILTERS = Set.of(
-            "player", "action", "block", "item", "entity", "name", "per-page");
+            "player", "action", "block", "item", "entity", "mod", "per-page");
+    /** The one-line refusal of the removed name: filter (Owner 11-22 5:12 AM, item 10). */
+    static final String NAME_FILTER_REMOVED = "name: was removed. Use block:, item: or entity: with the name in"
+            + " quotes, for example item:\"Lucky Pick\".";
     private static final AuditActionPresentationCatalog ACTION_PRESENTATIONS =
             new AuditActionPresentationCatalog();
     private static final AuditEntryPresenter ENTRY_PRESENTER = new AuditEntryPresenter(
@@ -336,6 +344,15 @@ public final class ExtendedLookup {
             RecordingSnapshot recording, EventTrailStatusMonitor.HealthSnapshot connectivity,
             AbstractJdbcStorage.WriteBufferStats stats, long notReadyRefusedRows, long skippedCaptureAttempts,
             long now) {
+        return recordingStatusLines(recording, connectivity, stats, notReadyRefusedRows, skippedCaptureAttempts, now,
+                ZoneId.systemDefault());
+    }
+
+    /** As above; the shown times use {@link DisplayTimeFormatter} in {@code zone} (Owner Q241 A). */
+    static List<String> recordingStatusLines(
+            RecordingSnapshot recording, EventTrailStatusMonitor.HealthSnapshot connectivity,
+            AbstractJdbcStorage.WriteBufferStats stats, long notReadyRefusedRows, long skippedCaptureAttempts,
+            long now, ZoneId zone) {
         List<String> lines = new ArrayList<>();
         lines.add("§8§m-----------------------------------------------------");
         lines.add("§6EventTrail Status");
@@ -348,7 +365,7 @@ public final class ExtendedLookup {
                     lines.add("§7Reason: §f" + failure.explanation());
                     lines.add("§7Action: §f" + failure.action());
                 }
-                lines.add("§7Disabled since: §f" + java.time.Instant.ofEpochMilli(recording.disabledSinceMillis())
+                lines.add("§7Disabled since: §f" + DisplayTimeFormatter.format(recording.disabledSinceMillis(), zone)
                         + " §8(" + formatStatusAge(Math.max(0L, now - recording.disabledSinceMillis())) + ")");
                 lines.add("§cEvents occurring while disabled are not recorded and will not be backfilled.");
             }
@@ -371,7 +388,7 @@ public final class ExtendedLookup {
         }
         if (recording.lastRecoveryMillis() > 0L) {
             lines.add("§7Last verified recording recovery: §f"
-                    + java.time.Instant.ofEpochMilli(recording.lastRecoveryMillis()));
+                    + DisplayTimeFormatter.format(recording.lastRecoveryMillis(), zone));
         }
         lines.add(recording.historyReady()
                 ? "§7History: §aAvailable for investigation; connectivity is separate"
@@ -1013,12 +1030,50 @@ public final class ExtendedLookup {
         if (!used.contains("action")) {
             suggestIfPrefix(b, "action:", lower);
         }
+        if (lower.startsWith("mod:")) {
+            if (used.contains("mod")) return;
+            for (String suggestion : modSuggestionsForToken(token, installedModIds())) b.suggest(suggestion);
+            return;
+        }
+
         if (!used.contains("block")) suggestIfPrefix(b, "block:", lower);
         if (!used.contains("item")) suggestIfPrefix(b, "item:", lower);
-        // name: and entity: select disjoint rows, so parse rejects them together; do not offer the pair.
-        if (!used.contains("entity") && !used.contains("name")) suggestIfPrefix(b, "entity:", lower);
-        if (!used.contains("name") && !used.contains("entity")) suggestIfPrefix(b, "name:", lower);
+        if (!used.contains("entity")) suggestIfPrefix(b, "entity:", lower);
+        if (!used.contains("mod")) suggestIfPrefix(b, "mod:", lower);
         if (!used.contains("per-page")) suggestIfPrefix(b, "per-page:", lower);
+    }
+
+    /**
+     * Tab for mod: (Owner 11-22 5:12 AM item 13): the installed mod IDs plus "minecraft", completing the member
+     * after the last ',' by prefix; members already typed are kept and not offered again.
+     */
+    static List<String> modSuggestionsForToken(String token, Collection<String> installedModIds) {
+        if (token == null || !token.regionMatches(true, 0, "mod:", 0, "mod:".length())) return List.of();
+        String value = token.substring("mod:".length());
+        int separator = value.lastIndexOf(',');
+        String completed = separator < 0 ? "" : value.substring(0, separator + 1);
+        String partial = (separator < 0 ? value : value.substring(separator + 1)).toLowerCase(Locale.ROOT);
+        Set<String> typed = new LinkedHashSet<>(List.of(completed.toLowerCase(Locale.ROOT).split(",")));
+        java.util.TreeSet<String> ids = new java.util.TreeSet<>(installedModIds);
+        ids.add("minecraft");
+        List<String> suggestions = new ArrayList<>();
+        for (String id : ids) {
+            if (id.startsWith(partial) && !typed.contains(id)) suggestions.add("mod:" + completed + id);
+        }
+        return List.copyOf(suggestions);
+    }
+
+    /** The installed mod IDs from the mod loader; empty when there is no mod list (unit tests). */
+    static List<String> installedModIds() {
+        try {
+            net.neoforged.fml.ModList mods = net.neoforged.fml.ModList.get();
+            if (mods == null) return List.of();
+            List<String> ids = new ArrayList<>();
+            for (net.neoforged.neoforgespi.language.IModInfo mod : mods.getMods()) ids.add(mod.getModId());
+            return List.copyOf(ids);
+        } catch (RuntimeException | LinkageError unavailable) {
+            return List.of();
+        }
     }
 
     /** Full-token replacements for the bounded comma-separated action grammar. */
@@ -1350,34 +1405,53 @@ public final class ExtendedLookup {
                     p.actionSelection = parsedActions.selection();
                     baseTokens.add("action:" + canonicalActions(p.actionSelection));
                 }
-                case "block" -> {
-                    value = stripOptionalQuotes(value);
-                    if (value.isBlank()) { p.error = "block: requires a block name or id."; return p; }
-                    p.block = value.toLowerCase(Locale.ROOT);
-                    p.blockNeedles = resolveBlockSearchNeedles(value);
-                    baseTokens.add("block:" + value);
-                }
-                case "item" -> {
-                    value = stripOptionalQuotes(value);
-                    if (value.isBlank()) { p.error = "item: requires an item name or id."; return p; }
-                    p.item = value.toLowerCase(Locale.ROOT);
-                    p.itemNeedles = resolveItemSearchNeedles(value);
-                    baseTokens.add("item:" + value);
-                }
-                case "entity" -> {
-                    value = stripOptionalQuotes(value);
-                    if (value.isBlank()) { p.error = "entity: requires an entity name or id."; return p; }
-                    p.entity = value.toLowerCase(Locale.ROOT);
-                    baseTokens.add("entity:" + value);
-                }
-                case "name" -> {
-                    ExactNameParseResult exact = parseExactNameValue(value);
-                    if (!exact.successful()) {
-                        p.error = exact.error();
+                case "block", "item", "entity" -> {
+                    LookupThingValue.Result things = LookupThingValue.parseThings(key, value,
+                            name -> normalNameIds(key, name) != null);
+                    if (!things.successful()) {
+                        p.error = things.error();
                         return p;
                     }
-                    p.exactName = exact.name();
-                    baseTokens.add("name:" + quotedExactName(exact.name()));
+                    List<ThingFilter> filters = new ArrayList<>();
+                    for (LookupThingValue.Member member : things.members()) {
+                        if (!member.quoted()) {
+                            filters.add(ThingFilter.id(member.value()));
+                            continue;
+                        }
+                        String folded = ThingFilter.foldName(member.value());
+                        List<String> normalIds = normalNameIds(key, folded);
+                        if (normalIds == null) {
+                            p.error = key + ":" + member.typed() + " matches more than " + MAX_RESOLVED_FILTER_VALUES
+                                    + " normal names. Narrow the name.";
+                            return p;
+                        }
+                        filters.add(ThingFilter.name(folded, normalIds));
+                    }
+                    if (totalThingValues(p) + filters.size() > MAX_RESOLVED_FILTER_VALUES) {
+                        p.error = "That EventTrail lookup is too large or complex. Narrow the search and try again.";
+                        return p;
+                    }
+                    switch (key) {
+                        case "block" -> p.blocks = List.copyOf(filters);
+                        case "item" -> p.items = List.copyOf(filters);
+                        default -> p.entities = List.copyOf(filters);
+                    }
+                    baseTokens.add(key + ":" + things.canonical());
+                }
+                case "mod" -> {
+                    LookupThingValue.Result mods = LookupThingValue.parseMods(value);
+                    if (!mods.successful()) {
+                        p.error = mods.error();
+                        return p;
+                    }
+                    List<String> ids = new ArrayList<>();
+                    for (LookupThingValue.Member member : mods.members()) {
+                        if (!ids.contains(member.value())) ids.add(member.value());
+                    }
+                    // R35: an ID no installed mod has (a removed mod) is searched like any other. G16 (a): when such
+                    // a search finds nothing, noMatchLines adds "<id> is not installed.".
+                    p.mods = List.copyOf(ids);
+                    baseTokens.add("mod:" + String.join(",", ids));
                 }
                 case "per-page" -> {
                     PerPageParseResult parsedPageSize = parsePerPageValue(value);
@@ -1392,66 +1466,58 @@ public final class ExtendedLookup {
                 default -> throw new IllegalStateException("Validated lookup filter was not handled: " + key);
             }
         }
-        if (p.exactName != null && p.entity != null) {
-            p.error = "name: matches block and container names, so it cannot be combined with entity:.";
-            return p;
-        }
-        // Lane xn r2 (review-01 MINOR-3 d): an action list with no block or container action could only ever
-        // give zero rows, which would read like "nobody touched it"; refuse it as entity: is refused.
-        if (p.exactName != null && !AdvancedQuery.exactNameCanMatch(p.actionSelection)) {
-            p.error = "name: matches block and container names, so action: must include a block or container"
-                    + " action (break, place, explosion, container_open, container_closed, container_deposit"
-                    + " or container_withdrawal).";
-            return p;
-        }
-
         p.baseQuery = String.join(" ", baseTokens);
         return p;
     }
 
-    /**
-     * The value of {@code name:} as the exact logged name to match: one pair of matching outer quotes ("..." or
-     * '...') is removed and the rest trimmed; nothing else changes (no case change, no folding). Words were
-     * already joined with one space by the lookup tokenizer, which is also how stored names are cleaned.
-     */
-    static ExactNameParseResult parseExactNameValue(String value) {
-        String trimmed = value == null ? "" : value.trim();
-        if (!trimmed.isEmpty() && isQuote(trimmed.charAt(0))
-                && (trimmed.length() < 2 || trimmed.charAt(trimmed.length() - 1) != trimmed.charAt(0))) {
-            return new ExactNameParseResult(null,
-                    "name: has an opening quote without its closing quote, for example name:\"Oak Iron Chest\".");
-        }
-        String name = stripOptionalQuotes(trimmed);
-        if (name.isBlank()) {
-            return new ExactNameParseResult(null,
-                    "name: requires the exact block or container name, for example name:\"Oak Iron Chest\".");
-        }
-        return new ExactNameParseResult(name, null);
+    private static int totalThingValues(Parsed p) {
+        return p.blocks.size() + p.items.size() + p.entities.size() + p.mods.size();
     }
 
     /**
-     * The canonical {@code name:} value for the base query: the first spelling that the lookup tokenizer and
-     * {@link #parseExactNameValue} read back as this exact name, tried in this order: wrapped in quotes that do
-     * not occur in the name, wrapped in the other quote, unquoted (lane xn r2, review-01 NIT-2: for example
-     * {@code Dogs' "Loot" Box} needs the unquoted form). When none reads back (a name with a word ending in each
-     * quote kind and a later word holding ':'), the first form is kept: the base query is display text that
-     * production never parses again.
+     * The registry IDs whose normal (game) name matches a folded quoted name, whole and ignoring case, {@code *}
+     * as the wildcard: the "normal name" half of a quoted block:, item: or entity: value. Empty when the
+     * registries cannot be read (unit tests without a game); null when more than
+     * {@link #MAX_RESOLVED_FILTER_VALUES} IDs match.
      */
-    static String quotedExactName(String name) {
-        char quote = name.indexOf('"') < 0 ? '"' : '\'';
-        char other = quote == '"' ? '\'' : '"';
-        String first = quote + name + quote;
-        for (String candidate : List.of(first, other + name + other, name)) {
-            if (readsBackAsExactName(candidate, name)) return candidate;
+    static List<String> normalNameIds(String key, String foldedName) {
+        List<String> ids = new ArrayList<>();
+        try {
+            switch (key) {
+                case "block" -> {
+                    for (Block block : BuiltInRegistries.BLOCK) {
+                        if (!addNormalNameId(ids, foldedName, DisplayNameResolver.blockDisplayName(block),
+                                BuiltInRegistries.BLOCK.getKey(block))) return null;
+                    }
+                }
+                case "item" -> {
+                    for (Item item : BuiltInRegistries.ITEM) {
+                        if (!addNormalNameId(ids, foldedName, DisplayNameResolver.itemTypeName(item),
+                                BuiltInRegistries.ITEM.getKey(item))) return null;
+                    }
+                }
+                default -> {
+                    for (net.minecraft.world.entity.EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
+                        if (!addNormalNameId(ids, foldedName, type.getDescription().getString(),
+                                BuiltInRegistries.ENTITY_TYPE.getKey(type))) return null;
+                    }
+                }
+            }
+        } catch (RuntimeException | LinkageError unavailable) {
+            // No game registries (unit tests): the logged-name half still matches.
+            return List.of();
         }
-        return first;
+        return List.copyOf(ids);
     }
 
-    private static boolean readsBackAsExactName(String value, String name) {
-        String[] tokens = mergeLookupTokens(("global time:1h name:" + value).split("\\s+"));
-        if (tokens.length != 3 || !tokens[2].startsWith("name:")) return false;
-        ExactNameParseResult parsed = parseExactNameValue(tokens[2].substring("name:".length()));
-        return parsed.successful() && name.equals(parsed.name());
+    /** Adds the ID when its normal name matches; false once more than the cap would be added. */
+    private static boolean addNormalNameId(
+            List<String> ids, String foldedName, String normalName, net.minecraft.resources.ResourceLocation key) {
+        if (key == null || normalName == null) return true;
+        if (!ThingFilter.nameMatches(foldedName, normalName)) return true;
+        if (ids.size() >= MAX_RESOLVED_FILTER_VALUES) return false;
+        ids.add(key.toString());
+        return true;
     }
 
     private static boolean isQuote(char character) {
@@ -1490,6 +1556,9 @@ public final class ExtendedLookup {
                         "Unknown lookup option: " + token);
             }
             String key = lower.substring(0, colon);
+            if (key.equals("name")) {
+                return OptionalFilterTokenParseResult.failure(NAME_FILTER_REMOVED);
+            }
             if (!isSupportedLookupFilter(key)) {
                 return OptionalFilterTokenParseResult.failure(
                         "Unknown lookup option: " + token);
@@ -1676,16 +1745,63 @@ public final class ExtendedLookup {
                 p.scope == Scope.RADIUS ? p.radius : 0,
                 p.player,
                 p.actionSelection,
-                p.block,
-                p.blockNeedles,
-                p.item,
-                p.itemNeedles,
-                p.entity,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
                 null,
                 p.perPage,
                 p.page,
-                p.exactName
+                null,
+                new ThingFilters(p.blocks, p.items, p.entities, p.mods)
         );
+    }
+
+    /**
+     * The line shown when a lookup with a block:, item:, entity: or mod: filter finds nothing (Owner 11-22
+     * 5:12 AM item 8; mock text): {@code No match for item:diamond. Hover names for IDs.} Null when the base
+     * query has no such filter. NOT YET SHOWN: the line points at the name hovers, which the held presentation
+     * track builds, so the render call joins with that track; it calls {@link #noMatchLines}, which adds G16's
+     * "not installed" lines.
+     */
+    static String noMatchLine(String baseQuery) {
+        if (baseQuery == null) return null;
+        List<String> filters = new ArrayList<>();
+        for (String token : mergeLookupTokens(baseQuery.split(" "))) {
+            String lower = token.toLowerCase(Locale.ROOT);
+            if (lower.startsWith("block:") || lower.startsWith("item:") || lower.startsWith("entity:")
+                    || lower.startsWith("mod:")) {
+                filters.add(token);
+            }
+        }
+        return filters.isEmpty() ? null : "No match for " + String.join(" ", filters) + ". Hover names for IDs.";
+    }
+
+    /**
+     * The lines shown when a lookup with a block:, item:, entity: or mod: filter finds nothing: {@link #noMatchLine},
+     * then G16 (a) (lead D-380): for each mod: ID that no installed mod has, {@code <id> is not installed.}, in the
+     * order typed. Such an ID is still searched like any other (R35: entries from a removed mod still match), so
+     * the note appears only when the search finds nothing. "minecraft" always counts as installed, as in Tab. Empty
+     * when the base query has no such filter.
+     */
+    static List<String> noMatchLines(String baseQuery, Collection<String> installedModIds) {
+        String first = noMatchLine(baseQuery);
+        if (first == null) return List.of();
+        List<String> lines = new ArrayList<>();
+        lines.add(first);
+        Set<String> installed = new LinkedHashSet<>(installedModIds == null ? List.of() : installedModIds);
+        installed.add("minecraft");
+        for (String token : mergeLookupTokens(baseQuery.split(" "))) {
+            if (!token.regionMatches(true, 0, "mod:", 0, "mod:".length())) continue;
+            for (String id : token.substring("mod:".length()).split(",")) {
+                if (!id.isEmpty() && !installed.contains(id)) {
+                    lines.add(id + " is not installed.");
+                    installed.add(id);
+                }
+            }
+        }
+        return List.copyOf(lines);
     }
 
     private static QueryResult runInitialQuery(
@@ -2084,15 +2200,18 @@ public final class ExtendedLookup {
     }
 
     /**
-     * Allow readable filter values with spaces, e.g.
-     * item:Smooth Sky Stone Chest or block:Oak Chest.
-     * Continuation words are joined onto block/item/entity/name filters until the next
-     * token containing a ':' begins.
+     * Joins the words of a block:, item:, entity: or mod: value, so that quoted names keep their spaces and
+     * quotes, e.g. item:"Lucky Pick" or block:"Vault: North".
      *
-     * <p>name: only: a value that opens with a quote ("..." or '...') takes every
-     * following word, even one containing ':', up to and including the first word
-     * that ends with that quote; a value whose quotes are closed takes no more
-     * words. No other filter's merging changes.</p>
+     * <ul>
+     *   <li>Inside a quoted comma member ("..." or '...'), every word joins, even one holding ':'.</li>
+     *   <li>After a trailing ',' the next word joins (the next member).</li>
+     *   <li>After the key alone (block: "Vault: North"), a word that opens a quote joins, even one holding ':'.</li>
+     *   <li>Otherwise a word holding ':' starts a new filter; a word without one joins a value that holds no quote
+     *   yet (an unquoted multi-word value, which parse refuses with the quote hint), and is its own token after a
+     *   closed quoted value. A quote opens a quoted value only at the start of a comma member, so an apostrophe
+     *   inside a word is a plain character.</li>
+     * </ul>
      */
     static String[] mergeLookupTokens(String[] raw) {
         if (raw == null || raw.length <= 2) return raw == null ? new String[0] : raw;
@@ -2101,19 +2220,14 @@ public final class ExtendedLookup {
         merged.add(new StringBuilder(raw[0]));
         if (raw.length > 1) merged.add(new StringBuilder(raw[1]));
         StringBuilder continuation = null;
-        boolean continuationIsName = false;
-        char openNameQuote = 0;
 
         for (int i = 2; i < raw.length; i++) {
             String token = raw[i];
             if (token == null || token.isBlank()) continue;
 
-            if (openNameQuote != 0) {
+            if (continuation != null && (insideQuotes(continuation) || endsWithComma(continuation)
+                    || (valueIsEmpty(continuation) && isQuote(token.charAt(0))))) {
                 continuation.append(' ').append(token);
-                if (token.charAt(token.length() - 1) == openNameQuote) {
-                    openNameQuote = 0;
-                    continuation = null;
-                }
                 continue;
             }
 
@@ -2121,31 +2235,12 @@ public final class ExtendedLookup {
                 StringBuilder next = new StringBuilder(token);
                 merged.add(next);
                 String key = token.substring(0, token.indexOf(':')).toLowerCase(Locale.ROOT);
-                continuationIsName = key.equals("name");
-                continuation = key.equals("item") || key.equals("block") || key.equals("entity")
-                        || continuationIsName
-                        ? next
-                        : null;
-                if (continuationIsName) {
-                    openNameQuote = nameQuoteState(next);
-                    if (openNameQuote == CLOSED_NAME_QUOTE) {
-                        openNameQuote = 0;
-                        continuation = null;
-                    }
-                }
+                continuation = THING_FILTER_KEYS.contains(key) ? next : null;
                 continue;
             }
 
-            if (continuation != null) {
+            if (continuation != null && !holdsQuote(continuation)) {
                 continuation.append(' ').append(token);
-                if (continuationIsName) {
-                    // name: followed by a space, then a quoted value.
-                    openNameQuote = nameQuoteState(continuation);
-                    if (openNameQuote == CLOSED_NAME_QUOTE) {
-                        openNameQuote = 0;
-                        continuation = null;
-                    }
-                }
                 continue;
             }
 
@@ -2158,22 +2253,57 @@ public final class ExtendedLookup {
         return result;
     }
 
-    /**
-     * nameQuoteState: the name: value opens with a quote and also ends with it. U+FFFF, a noncharacter that is
-     * never a quote, written as a cast so the source holds no invisible character (lane xn r2, review-01 NIT-1).
-     */
-    private static final char CLOSED_NAME_QUOTE = (char) 0xFFFF;
+    /** The filters whose values may hold spaces (quoted names, and unquoted words that parse then refuses). */
+    private static final Set<String> THING_FILTER_KEYS = Set.of("block", "item", "entity", "mod");
+
+    private static final int NO_QUOTE = 0;
+    private static final int CLOSED_QUOTE = 1;
+    private static final int OPEN_QUOTE = 2;
 
     /**
-     * For a name: token built so far: its opening quote while that quote is still open, {@link #CLOSED_NAME_QUOTE}
-     * when the value is a closed quoted value, or 0 when the value does not start with a quote.
+     * Whether the filter token's value holds a quoted member: none, one that is closed, or one that is still open
+     * at the end. A quote ("..." or '...') opens a member only at the start of a comma member, so an apostrophe
+     * inside an unquoted word is a plain character.
      */
-    private static char nameQuoteState(CharSequence nameToken) {
-        String value = nameToken.toString();
-        value = value.substring(value.indexOf(':') + 1).trim();
-        if (value.isEmpty() || !isQuote(value.charAt(0))) return 0;
-        char quote = value.charAt(0);
-        return value.length() >= 2 && value.charAt(value.length() - 1) == quote ? CLOSED_NAME_QUOTE : quote;
+    private static int quoteState(CharSequence filterToken) {
+        String token = filterToken.toString();
+        char open = 0;
+        boolean held = false;
+        boolean memberStart = true;
+        for (int i = token.indexOf(':') + 1; i < token.length(); i++) {
+            char character = token.charAt(i);
+            if (open != 0) {
+                if (character == open) open = 0;
+            } else if (character == ',') {
+                memberStart = true;
+            } else if (character != ' ') {
+                if (memberStart && isQuote(character)) {
+                    open = character;
+                    held = true;
+                }
+                memberStart = false;
+            }
+        }
+        return open != 0 ? OPEN_QUOTE : held ? CLOSED_QUOTE : NO_QUOTE;
+    }
+
+    /** True when the filter token's value ends inside a quoted member. */
+    private static boolean insideQuotes(CharSequence filterToken) {
+        return quoteState(filterToken) == OPEN_QUOTE;
+    }
+
+    /** True when the filter token is only its key and ':' (spaces may follow), so its value has not started. */
+    private static boolean valueIsEmpty(CharSequence filterToken) {
+        String token = filterToken.toString();
+        return token.substring(token.indexOf(':') + 1).isBlank();
+    }
+
+    private static boolean endsWithComma(CharSequence filterToken) {
+        return filterToken.length() > 0 && filterToken.charAt(filterToken.length() - 1) == ',';
+    }
+
+    private static boolean holdsQuote(CharSequence filterToken) {
+        return quoteState(filterToken) != NO_QUOTE;
     }
 
     static String validateLookupInput(String raw) {
@@ -2232,7 +2362,7 @@ public final class ExtendedLookup {
             if (colon <= 0) continue;
             String key = token.substring(0, colon);
             cost += switch (key) {
-                case "block", "item", "entity", "name" -> 15;
+                case "block", "item", "entity", "mod" -> 15;
                 case "player" -> 8;
                 case "action" -> 2;
                 default -> 0;
@@ -2257,103 +2387,6 @@ public final class ExtendedLookup {
         } catch (NumberFormatException ignored) {
             return 0;
         }
-    }
-
-    private static String stripOptionalQuotes(String value) {
-        if (value == null) return "";
-        String v = value.trim();
-        if (v.length() >= 2) {
-            char first = v.charAt(0);
-            char last = v.charAt(v.length() - 1);
-            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
-                v = v.substring(1, v.length() - 1).trim();
-            }
-        }
-        return v;
-    }
-
-    /**
-     * Convert a human-readable block filter to the registry id(s) stored in
-     * block_state. Both block:ae2:smooth_sky_stone_chest and
-     * block:Smooth Sky Stone Chest can therefore match.
-     */
-    static List<String> resolveBlockSearchNeedles(String query) {
-        LinkedHashSet<String> needles = new LinkedHashSet<>();
-        if (query == null || query.isBlank()) return new ArrayList<>(needles);
-
-        String raw = query.trim().toLowerCase(Locale.ROOT);
-        String normalized = normalizeSearchText(raw);
-        needles.add(raw);
-
-        try {
-            for (Block block : BuiltInRegistries.BLOCK) {
-                var key = BuiltInRegistries.BLOCK.getKey(block);
-                if (key == null) continue;
-
-                String id = key.toString().toLowerCase(Locale.ROOT);
-                String idNormalized = normalizeSearchText(id);
-                String display = normalizeSearchText(blockDisplayName(block));
-
-                if (id.contains(raw)
-                        || (!normalized.isBlank() && idNormalized.contains(normalized))
-                        || (!normalized.isBlank() && display.contains(normalized))) {
-                    needles.add(id);
-                    if (needles.size() >= MAX_RESOLVED_FILTER_VALUES) break;
-                }
-            }
-        } catch (Throwable ignored) {}
-
-        return new ArrayList<>(needles);
-    }
-
-    private static String blockDisplayName(Block block) {
-        return DisplayNameResolver.blockDisplayName(block);
-    }
-
-    /**
-     * Convert a human-readable item filter to the registry id(s) actually stored
-     * inside EventTrail's serialized ItemStack NBT. This lets both
-     * item:ae2:smooth_sky_stone_chest and item:Smooth Sky Stone Chest work.
-     */
-    static List<String> resolveItemSearchNeedles(String query) {
-        LinkedHashSet<String> needles = new LinkedHashSet<>();
-        if (query == null || query.isBlank()) return new ArrayList<>(needles);
-
-        String raw = query.trim().toLowerCase(Locale.ROOT);
-        String normalized = normalizeSearchText(raw);
-        needles.add(raw);
-
-        try {
-            for (Item item : BuiltInRegistries.ITEM) {
-                var key = BuiltInRegistries.ITEM.getKey(item);
-                if (key == null) continue;
-
-                String id = key.toString().toLowerCase(Locale.ROOT);
-                String idNormalized = normalizeSearchText(id);
-
-                String display = normalizeSearchText(DisplayNameResolver.itemTypeName(item));
-
-                if (id.contains(raw)
-                        || (!normalized.isBlank() && idNormalized.contains(normalized))
-                        || (!normalized.isBlank() && display.contains(normalized))) {
-                    needles.add(id);
-                    // Avoid generating unbounded SQL if someone searches a very
-                    // broad word such as "block".
-                    if (needles.size() >= MAX_RESOLVED_FILTER_VALUES) break;
-                }
-            }
-        } catch (Throwable ignored) {}
-
-        return new ArrayList<>(needles);
-    }
-
-    private static String normalizeSearchText(String value) {
-        if (value == null) return "";
-        return value.toLowerCase(Locale.ROOT)
-                .replace('_', ' ')
-                .replace('-', ' ')
-                .replaceAll("\\s+", " ")
-                .trim();
     }
 
     private static long parseDuration(String value) {
@@ -2508,23 +2541,15 @@ public final class ExtendedLookup {
         String world;
         String player;
         ActionSelection actionSelection = ActionSelection.unrestricted();
-        String block;
-        List<String> blockNeedles;
-        String item;
-        List<String> itemNeedles;
-        String entity;
-        /** name: the exact logged block or container name, as typed (quotes removed); null without name:. */
-        String exactName;
+        /** The block:, item: and entity: values (each an exact ID or a quoted name), and the mod: IDs. */
+        List<ThingFilter> blocks = List.of();
+        List<ThingFilter> items = List.of();
+        List<ThingFilter> entities = List.of();
+        List<String> mods = List.of();
         int perPage;
         int page;
         String baseQuery;
         String error;
-    }
-
-    static record ExactNameParseResult(String name, String error) {
-        boolean successful() {
-            return name != null && error == null;
-        }
     }
 
     private record QueryResult(long total, List<AuditRecord> entries, int page, int totalPages,
@@ -2545,11 +2570,15 @@ public final class ExtendedLookup {
             String baseQuery,
             AdvancedQuery query
     ) {
+        /**
+         * The block, item and entity components are unused since the exact filters (their values live in
+         * {@code query.things()} and, as typed, in {@code baseQuery}); they stay null here.
+         */
         private static LookupSession from(Parsed parsed, AdvancedQuery query) {
             return new LookupSession(
                     parsed.scope, parsed.radius, parsed.durationMs, parsed.timeLabel,
-                    parsed.world, parsed.player, parsed.actionSelection, parsed.block,
-                    parsed.item, parsed.entity, parsed.perPage, parsed.baseQuery, query);
+                    parsed.world, parsed.player, parsed.actionSelection, null,
+                    null, null, parsed.perPage, parsed.baseQuery, query);
         }
 
         LookupSession withQuery(AdvancedQuery updatedQuery) {

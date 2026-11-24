@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.betapetey.eventtrail.EventTrailConfig;
 import io.github.betapetey.eventtrail.audit.AuditAction;
+import io.github.betapetey.eventtrail.inventory.core.ContainerTransferPayloadCodec;
 import io.github.betapetey.eventtrail.audit.AuditPayloadCodec;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
 import io.github.betapetey.eventtrail.audit.SchemaV1Row;
@@ -3898,7 +3899,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 }
                 if (originalAutoCommit) connection.setAutoCommit(false);
 
-                if (where.textCheck() != null || where.nameCheck() != null) {
+                if (where.javaChecked()) {
                     AdvancedQueryResult checked = executeJavaCheckedQuery(connection, where, query);
                     connection.commit();
                     return checked;
@@ -3991,17 +3992,23 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             throws Exception {
         SearchFold.TextCheck check = where.textCheck();
         LoggedNameFilter nameCheck = where.nameCheck();
+        ThingFilters thingCheck = where.thingCheck();
         int perPage = Math.max(1, query.perPage());
         int requestedPage = Math.max(1, query.page());
         int chunkRows = Math.max(1, candidateChunkRows());
         int budgetSeconds = EventTrailConfig.DATABASE_QUERY_TIMEOUT_SECONDS.get();
         long deadline = candidateScanNanoTime() + TimeUnit.SECONDS.toNanos(budgetSeconds);
         // The text check's columns first, in its order (TextCheck.matches reads them by position), then any
-        // column the name check needs that is not already read.
+        // column the name check or the thing check needs that is not already read.
         List<String> readColumns = new ArrayList<>(check == null ? List.of() : check.columns());
         int textColumns = readColumns.size();
         if (nameCheck != null) {
             for (String column : LoggedNameFilter.COLUMNS) {
+                if (!readColumns.contains(column)) readColumns.add(column);
+            }
+        }
+        if (thingCheck != null) {
+            for (String column : ThingFilters.COLUMNS) {
                 if (!readColumns.contains(column)) readColumns.add(column);
             }
         }
@@ -4044,6 +4051,10 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                             boolean matches = check == null || check.matches(stored.subList(0, textColumns));
                             if (matches && nameCheck != null) {
                                 matches = nameCheck.matches(payloadCodec, stored.get(actionColumn),
+                                        stored.get(subjectColumn), stored.get(payloadColumn));
+                            }
+                            if (matches && thingCheck != null) {
+                                matches = thingCheck.matchesRow(payloadCodec, stored.get(actionColumn),
                                         stored.get(subjectColumn), stored.get(payloadColumn));
                             }
                             if (matches) scan.match(id);
@@ -4244,8 +4255,131 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             nameCheck = new LoggedNameFilter(query.exactName());
             appendExactNamePredicate(where, params, nameCheck);
         }
+        ThingFilters things = query.things();
+        if (!things.isEmpty()) appendThingPredicate(where, params, things);
         return new WhereParts(where.toString(), params,
-                javaChecked.isEmpty() ? null : SearchFold.TextCheck.of(javaChecked), nameCheck);
+                javaChecked.isEmpty() ? null : SearchFold.TextCheck.of(javaChecked), nameCheck,
+                things.isEmpty() ? null : things);
+    }
+
+    /**
+     * The SQL part of the {@code block:}, {@code item:}, {@code entity:} and {@code mod:} filters: one AND group
+     * per given filter, each the OR of the row families it reads (see {@link ThingFilters}). It is a necessary
+     * condition only; {@link #executeJavaCheckedQuery} decides every candidate with
+     * {@link ThingFilters#matchesRow}. ID values narrow by LIKE on the stored ID ({@code block_state}, the item ID
+     * that opens a transfer payload, or an SNBT ID string in an entity payload), in this backend's
+     * {@link #exactNameLikeSql} form. A quoted name
+     * cannot narrow its row family (a custom name is inside the payload, mostly binary), so a group holding a name
+     * keeps only its action restriction. After a failed self-test every group keeps only its action restriction.
+     */
+    private void appendThingPredicate(StringBuilder where, List<Object> params, ThingFilters things) {
+        boolean prefilter = searchSqlUsable;
+        if (!things.blocks().isEmpty()) {
+            where.append(" AND (");
+            appendFamily(where, params, ThingFilters.BLOCK_ACTIONS, prefilter,
+                    idTerms("block_state", "", List.of("", "[%"), things.blocks()));
+            if (things.blocks().stream().anyMatch(value -> value.form() == ThingFilter.Form.NAME)) {
+                // G17 (a) name half: a quoted name also reads container rows by the container's logged name, which
+                // no SQL term can narrow (binary in transfers), so this family keeps only its action restriction.
+                where.append(" OR ");
+                appendFamily(where, params, ThingFilters.CONTAINER_ACTIONS, prefilter, null);
+            }
+            // HELD (G17, Q254): " OR " container rows by the container's registry ID (an ID value) goes here.
+            where.append(')');
+        }
+        if (!things.items().isEmpty()) {
+            where.append(" AND (");
+            appendFamily(where, params, ThingFilters.ITEM_ACTIONS, prefilter,
+                    idTerms("block_state", "", List.of(""), things.items()));
+            where.append(" OR ");
+            appendFamily(where, params, ThingFilters.TRANSFER_ACTIONS, prefilter,
+                    idTerms("extra_data", ContainerTransferPayloadCodec.PREFIX, List.of("|%"), things.items()));
+            where.append(" OR ");
+            // G19 (a): a kill's weapon, whose item ID is a quoted SNBT string in the entity payload.
+            appendFamily(where, params, ThingFilters.ENTITY_ACTIONS, prefilter, payloadIdTerms(things.items()));
+            where.append(')');
+        }
+        if (!things.entities().isEmpty()) {
+            where.append(" AND (");
+            // G19 (a): the victim (block_state, also in the payload), the killer and the "via" entity (the payload).
+            List<String[]> victim = idTerms("block_state", "", List.of(""), things.entities());
+            List<String[]> payload = payloadIdTerms(things.entities());
+            List<String[]> terms = null;
+            if (victim != null && payload != null) {
+                terms = new ArrayList<>(victim);
+                terms.addAll(payload);
+            }
+            appendFamily(where, params, ThingFilters.ENTITY_ACTIONS, prefilter, terms);
+            where.append(')');
+        }
+        if (!things.mods().isEmpty()) {
+            List<String[]> blockOrItem = new ArrayList<>();
+            List<String[]> transfer = new ArrayList<>();
+            List<String[]> entity = new ArrayList<>();
+            for (String mod : things.mods()) {
+                String namespace = ThingFilter.likeLiteral(mod + ":");
+                blockOrItem.add(new String[]{"block_state", namespace + "%"});
+                transfer.add(new String[]{"extra_data",
+                        ThingFilter.likeLiteral(ContainerTransferPayloadCodec.PREFIX) + namespace + "%"});
+                entity.add(new String[]{"block_state", namespace + "%"});
+                entity.add(new String[]{"extra_data", "%" + namespace + "%"});
+            }
+            where.append(" AND (");
+            appendFamily(where, params, ThingFilters.BLOCK_ACTIONS, prefilter, blockOrItem);
+            where.append(" OR ");
+            appendFamily(where, params, ThingFilters.ITEM_ACTIONS, prefilter, blockOrItem);
+            where.append(" OR ");
+            appendFamily(where, params, ThingFilters.TRANSFER_ACTIONS, prefilter, transfer);
+            where.append(" OR ");
+            appendFamily(where, params, ThingFilters.ENTITY_ACTIONS, prefilter, entity);
+            // HELD (G17, Q254): " OR " container access rows by the container's ID goes here.
+            where.append(')');
+        }
+    }
+
+    /**
+     * {@code (column, LIKE pattern)} terms of which a row of this family holding one of the ID values matches at
+     * least one, or null when a value is a quoted name (which no SQL term can narrow).
+     */
+    private static List<String[]> idTerms(String column, String prefix, List<String> suffixes,
+                                          List<ThingFilter> values) {
+        List<String[]> terms = new ArrayList<>();
+        for (ThingFilter value : values) {
+            if (value.form() == ThingFilter.Form.NAME) return null;
+            for (String pattern : value.idLikePatterns(prefix, suffixes)) terms.add(new String[]{column, pattern});
+        }
+        return terms;
+    }
+
+    /**
+     * {@code extra_data} terms for an entity payload naming one of the ID values anywhere as an SNBT string
+     * ({@code ...id:"minecraft:zombie"...}): {@code %"<id>%}. The trailing '%' keeps a weapon ID the payload stores
+     * with extra quotes a candidate (the Java check strips them, as the weapon label does). Null when a value is a
+     * quoted name.
+     */
+    private static List<String[]> payloadIdTerms(List<ThingFilter> values) {
+        List<String[]> terms = idTerms("extra_data", "\"", List.of("%"), values);
+        if (terms == null) return null;
+        List<String[]> anywhere = new ArrayList<>(terms.size());
+        for (String[] term : terms) anywhere.add(new String[]{term[0], "%" + term[1]});
+        return anywhere;
+    }
+
+    /** {@code (action_type IN (...) AND (term OR ...))}; the terms only when prefilter is on and they are known. */
+    private void appendFamily(StringBuilder where, List<Object> params, List<AuditAction> actions,
+                              boolean prefilter, List<String[]> terms) {
+        where.append("(action_type IN (").append(placeholders(actions.size())).append(')');
+        actions.forEach(action -> params.add(action.storageCode()));
+        if (prefilter && terms != null && !terms.isEmpty()) {
+            where.append(" AND (");
+            for (int index = 0; index < terms.size(); index++) {
+                if (index > 0) where.append(" OR ");
+                where.append(exactNameLikeSql(terms.get(index)[0]));
+                params.add(terms.get(index)[1]);
+            }
+            where.append(')');
+        }
+        where.append(')');
     }
 
     /**
@@ -6124,9 +6258,19 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
      * {@code textCheck}: T31-R4 text filters decided in Java after SQL; {@code nameCheck}: the {@code name:}
      * filter, always decided in Java after its SQL prefilter. Both null when SQL decides every row.
      */
-    record WhereParts(String sql, List<Object> params, SearchFold.TextCheck textCheck, LoggedNameFilter nameCheck) {
+    record WhereParts(String sql, List<Object> params, SearchFold.TextCheck textCheck, LoggedNameFilter nameCheck,
+                      ThingFilters thingCheck) {
         WhereParts(String sql, List<Object> params, SearchFold.TextCheck textCheck) {
-            this(sql, params, textCheck, null);
+            this(sql, params, textCheck, null, null);
+        }
+
+        WhereParts(String sql, List<Object> params, SearchFold.TextCheck textCheck, LoggedNameFilter nameCheck) {
+            this(sql, params, textCheck, nameCheck, null);
+        }
+
+        /** True when SQL alone cannot decide the rows and {@link #executeJavaCheckedQuery} must check each one. */
+        boolean javaChecked() {
+            return textCheck != null || nameCheck != null || thingCheck != null;
         }
     }
     record HighWaterParts(String sql, List<Object> params) {}

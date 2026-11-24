@@ -70,23 +70,36 @@ A lookup starts with a scope and then a time window; both are required, in that 
 - `global` searches all dimensions (needs the global lookup permission);
 - `time:<duration>` is a whole number followed by `s`, `m`, `h`, `d` or `w`.
 
-Optional filters, in any order: `player:`, `action:`, `block:`, `item:`, `entity:`, `name:` and `per-page:` (1 to
-50; the default is 5). Each option may be given once. Values within one `action:` list are ORed; all other filters
-are ANDed.
+Optional filters, in any order: `player:`, `action:`, `block:`, `item:`, `entity:`, `mod:` and `per-page:` (1 to
+50; the default is 5). Each option may be given once. Values in one comma list are ORed; different filters are
+ANDed.
 
 The actions are `break`, `place`, `container_open`, `container_closed`, `container_deposit`,
 `container_withdrawal`, `kill`, `death`, `drop`, `pickup` and `explosion`. Leaving out `action:` matches every
 action. Deposits and withdrawals are shown as **Added Item** and **Removed Item**.
 
-`block:` matches a block type. `name:` matches block and container rows by the exact, case-sensitive name the lookup
-shows for them; put the name in `"..."` or `'...'` if it contains a colon or a quote.
+`block:` matches the block of break, place and explosion rows, and a name in quotes also matches the container of
+open, close, deposit and withdrawal rows by the name it was logged with. `item:` matches the item of drop, pickup,
+deposit and withdrawal rows and the weapon of a kill. `entity:` matches the victim, the killer or the "via" entity of
+kill and death rows. Each takes one value or a comma list:
+
+- an ID without quotes is exact: `minecraft:oak_log` is that ID only, and `oak_log` is that ID in any mod, so it
+  never finds `minecraft:stripped_oak_log`;
+- a name in `"..."` or `'...'` is the whole name, ignoring case: the thing's normal name or the name it was logged
+  with, custom names included, so `item:"Diamond"` also finds dirt renamed "Diamond";
+- `*` is the only wildcard, in IDs and names: `block:*_log`, `item:"diamond*"`.
+
+`mod:` takes mod IDs (lowercase, as the mod names itself, with `minecraft` for the game) and matches an entry when
+any block, item or entity it names is from that mod; entries of a removed mod still match. Tab lists the installed
+mod IDs. `name:` was removed; use `block:`, `item:` or `entity:` with the name in quotes.
 
 ```text
 /eventtrail lookup radius:50 time:2h
 /eventtrail lookup world:minecraft:overworld time:1d player:Steve
 /eventtrail lookup global time:30m action:break per-page:50
-/eventtrail lookup radius:25 time:4h block:minecraft:oak_log
-/eventtrail lookup radius:50 time:1d name:"Oak Iron Chest"
+/eventtrail lookup radius:25 time:4h block:minecraft:oak_log,birch_log
+/eventtrail lookup radius:50 time:1d action:break,place block:"Oak Iron Chest"
+/eventtrail lookup global time:1h item:"Lucky Pick" mod:minecraft
 /eventtrail lookup global time:1h action:container_deposit,container_withdrawal
 ```
 
