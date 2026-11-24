@@ -11,6 +11,10 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.world.item.ItemStack;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
@@ -32,6 +36,25 @@ public final class EntityEventPayloadCodec {
     private static final String RETALIATION_EFFECT_KEY = "retaliation_effect";
     private static final String RETALIATION_NAME_KEY = "retaliation_name";
     private static final int MAX_MINIMAL_TECHNICAL_ID_CHARS = 2_048;
+    // Kill-weapon fix: a weapon's bounded identity, stored beside the weapon compound in the damage compound.
+    private static final String WEAPON_ID_KEY = "weapon_id";
+    private static final String WEAPON_ID_UNAVAILABLE_KEY = "weapon_id_unavailable";
+    private static final String WEAPON_NAME_KEY = "weapon_name";
+    private static final String WEAPON_CUSTOM_NAME_KEY = "weapon_custom_name";
+    private static final String WEAPON_RENAME_STATE_KEY = "weapon_rename_state";
+    /** Written only for a held-item weapon (Owner K2: it reads "holding X"); absent means the damage's own weapon. */
+    private static final String WEAPON_SOURCE_KEY = "weapon_source";
+    private static final String WEAPON_SOURCE_HELD = "held";
+    private static final String RENAME_STATE_UNREADABLE = "unreadable";
+    private static final String RENAME_STATE_CHECK_FAILED = "check_failed";
+    // Owner Q265 (a): a player death row's "last hit by <player>" note, a compound of its own at the payload root.
+    private static final String LAST_HIT_KEY = "last_hit_by";
+    private static final String LAST_HIT_PLAYER_UUID_KEY = "player_uuid";
+    // The name is stored as its UTF-8 bytes, never as text: the free-text entity: and item: lookups match the stored
+    // payload text, and the note must never make a row match its hitter's name.
+    private static final String LAST_HIT_PLAYER_NAME_KEY = "player_name_utf8";
+    /** Owner K1 A: a weapon existed but nothing that names it was stored. Never "Unknown". */
+    static final String WEAPON_NOT_RECORDED = "Weapon not recorded";
 
     private EntityEventPayloadCodec() {
     }
@@ -61,22 +84,46 @@ public final class EntityEventPayloadCodec {
             boolean rowActorSynthetic,
             boolean captureFullWeaponMetadata,
             WeaponPayloadEncoder weaponEncoder) {
+        return encode(
+                evidence,
+                rowKind,
+                damage,
+                attribution,
+                rowActorSynthetic,
+                captureFullWeaponMetadata,
+                weaponEncoder,
+                GAME_WEAPON_IDENTITY);
+    }
+
+    /** Test seam: {@link #encode} with a supplied weapon identity reader (tests fake modded ids and names). */
+    static String encode(
+            CommittedEntityDeathEvidence evidence,
+            RowKind rowKind,
+            EntityDamageEvidence damage,
+            EntityKillAttribution attribution,
+            boolean rowActorSynthetic,
+            boolean captureFullWeaponMetadata,
+            WeaponPayloadEncoder weaponEncoder,
+            WeaponIdentityReader identityReader) {
         Objects.requireNonNull(evidence, "evidence");
         Objects.requireNonNull(rowKind, "rowKind");
         Objects.requireNonNull(damage, "damage");
         Objects.requireNonNull(attribution, "attribution");
         Objects.requireNonNull(weaponEncoder, "weaponEncoder");
+        Objects.requireNonNull(identityReader, "identityReader");
 
         try {
             CompoundTag root = basePayload(evidence, rowKind, damage, attribution, rowActorSynthetic);
+            CompoundTag damageTag = root.getCompound(DAMAGE_KEY);
             putWeapon(
-                    root.getCompound(DAMAGE_KEY),
+                    damageTag,
                     damage,
                     captureFullWeaponMetadata,
                     weaponEncoder,
+                    identityReader,
                     evidence.victim().typeId().toString());
             String encoded = PREFIX + root;
-            if (encoded.length() <= AuditSnbtParser.MAX_PAYLOAD_CHARS) {
+            if (storable(encoded)) {
                 return encoded;
             }
 
@@ -84,13 +131,11 @@ public final class EntityEventPayloadCodec {
                     "entity event write",
                     evidence.victim().typeId().toString(),
                     encoded.length());
-            CompoundTag damageTag = root.getCompound(DAMAGE_KEY);
-            damageTag.remove("weapon");
-            damageTag.putBoolean("weapon_unavailable", true);
-            damageTag.putBoolean("weapon_metadata_unavailable", true);
-            damageTag.putString("weapon_metadata_reason", EventTrailTextBounds.METADATA_REASON_TOO_LARGE);
+            // Kill-weapon fix: the weapon text gives way to its bounded stub; its identity keys stay. A row with no
+            // weapon claims none. A row the reader would refuse as too deep (K5) is handled the same way.
+            degradeOversizedWeapon(damageTag, damage);
             encoded = PREFIX + root;
-            if (encoded.length() <= AuditSnbtParser.MAX_PAYLOAD_CHARS) {
+            if (storable(encoded)) {
                 return encoded;
             }
             return boundedFallbackPayload(
@@ -99,7 +144,8 @@ public final class EntityEventPayloadCodec {
                     damage,
                     attribution,
                     rowActorSynthetic,
-                    EventTrailTextBounds.METADATA_REASON_TOO_LARGE);
+                    EventTrailTextBounds.METADATA_REASON_TOO_LARGE,
+                    identityReader);
         } catch (RuntimeException | LinkageError | StackOverflowError failure) {
             EventTrailNbtUtil.reportSerializationFailure(
                     "entity event write",
@@ -111,8 +157,18 @@ public final class EntityEventPayloadCodec {
                     damage,
                     attribution,
                     rowActorSynthetic,
-                    EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
+                    EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE,
+                    identityReader);
         }
+    }
+
+    /**
+     * A full row the reader accepts: within the row length limit and, K5 of the kill-weapon fix, within the reader's
+     * nesting limit, so a row is never stored that the reader would refuse as too complex.
+     */
+    private static boolean storable(String encoded) {
+        return encoded.length() <= AuditSnbtParser.MAX_PAYLOAD_CHARS
+                && AuditSnbtParser.validateStructure(encoded, PREFIX.length()) == AuditSnbtParser.Status.OK;
     }
 
     public static DecodedPayload decode(String extraData) {
@@ -299,7 +355,8 @@ public final class EntityEventPayloadCodec {
                             : null,
                     provenance == ProvenanceKind.RETALIATION
                             ? safeText(attribution.getString(RETALIATION_EFFECT_KEY), null)
-                            : null));
+                            : null,
+                    lastHitByPresentation(root, audit.projection().rowKind(), provenance, victim)));
         } catch (RuntimeException | LinkageError failure) {
             return PresentationProjectionResult.failure(DecodeStatus.MALFORMED);
         }
@@ -319,16 +376,66 @@ public final class EntityEventPayloadCodec {
         root.put(DAMAGE_KEY, damageTag(damage));
         root.put(ATTRIBUTION_KEY, attributionTag(attribution));
         root.putBoolean("row_actor_synthetic", rowActorSynthetic);
+        putLastHit(root, evidence, rowKind);
         return root;
     }
 
-    private static CompoundTag minimalPayload(
+    /**
+     * The Owner's Q265 (a) note: a death row's "last hit by" player, as its own compound beside the attribution, so it
+     * never reads as the row's killer or as an accountable player. Written only on a DEATH row. The UUID is an int
+     * array and the name its UTF-8 bytes, so no text of the note is in the stored row for a text lookup to find.
+     */
+    private static void putLastHit(CompoundTag root, CommittedEntityDeathEvidence evidence, RowKind rowKind) {
+        CommittedEntityDeathEvidence.LastHit note = evidence.lastHitBy();
+        if (note == null || rowKind != RowKind.DEATH) return;
+        CompoundTag tag = new CompoundTag();
+        tag.putUUID(LAST_HIT_PLAYER_UUID_KEY, note.playerId());
+        tag.putByteArray(LAST_HIT_PLAYER_NAME_KEY, note.playerName().getBytes(StandardCharsets.UTF_8));
+        root.put(LAST_HIT_KEY, tag);
+    }
+
+    /** The stored name bytes as text, or null when they are not well-formed UTF-8. */
+    private static String lastHitName(byte[] stored) {
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(stored))
+                    .toString();
+        } catch (CharacterCodingException malformed) {
+            return null;
+        }
+    }
+
+    /**
+     * The note's name for the presenter, or null: a row stored before the note, or any row that is not a DEATH row
+     * with no player credit (ENVIRONMENT), reads with no note, as does a note that is not well formed (no UUID, no name
+     * bytes, name bytes that are not UTF-8, a blank name, or the victim's own UUID). It is read only here, never by the
+     * audit projection, so it is never indexed or counted.
+     */
+    private static String lastHitByPresentation(
+            CompoundTag root, RowKind rowKind, ProvenanceKind provenance, CompoundTag victim) {
+        if (rowKind != RowKind.DEATH || provenance != ProvenanceKind.ENVIRONMENT) return null;
+        if (!root.contains(LAST_HIT_KEY, Tag.TAG_COMPOUND)) return null;
+        CompoundTag note = root.getCompound(LAST_HIT_KEY);
+        if (!note.hasUUID(LAST_HIT_PLAYER_UUID_KEY)) return null;
+        if (victim.hasUUID("uuid") && victim.getUUID("uuid").equals(note.getUUID(LAST_HIT_PLAYER_UUID_KEY))) {
+            return null;
+        }
+        if (!note.contains(LAST_HIT_PLAYER_NAME_KEY, Tag.TAG_BYTE_ARRAY)) return null;
+        String name = lastHitName(note.getByteArray(LAST_HIT_PLAYER_NAME_KEY));
+        return name == null ? null : safeText(name, null);
+    }
+
+    /** Test seam (kill-weapon fix): the bounded minimal payload; it never throws for a bounded identity reader. */
+    static CompoundTag minimalPayload(
             CommittedEntityDeathEvidence evidence,
             RowKind rowKind,
             EntityDamageEvidence damage,
             EntityKillAttribution attribution,
             boolean rowActorSynthetic,
-            String metadataReason) {
+            String metadataReason,
+            WeaponIdentityReader identityReader) {
         CompoundTag root = new CompoundTag();
         root.putInt(VERSION_KEY, CURRENT_VERSION);
         root.putUUID(OPERATION_ID_KEY, evidence.operationId());
@@ -361,13 +468,23 @@ public final class EntityEventPayloadCodec {
         if (damage.causingEntityUnavailable()) {
             cause.putBoolean("causing_entity_unavailable", true);
         }
-        if (damage.suppliedWeaponUnavailable() || damage.hasSuppliedWeapon()) {
+        if (damage.hasSuppliedWeapon()) {
+            // Kill-weapon fix: the weapon keeps its bounded identity and its stub here too.
+            ItemStack weapon = damage.suppliedWeapon();
+            putWeaponIdentity(cause, weapon, identityReader);
+            putWeaponSource(cause, damage);
+            putWeaponStub(cause, weapon, metadataReason);
+            cause.putBoolean("weapon_metadata_unavailable", true);
+            cause.putString("weapon_metadata_reason", metadataReason);
+            markWeaponUnavailableIfNoIdentity(cause);
+        } else if (damage.suppliedWeaponUnavailable()) {
             cause.putBoolean("weapon_unavailable", true);
             cause.putString("weapon_metadata_reason", metadataReason);
         }
         root.put(DAMAGE_KEY, cause);
         root.put(ATTRIBUTION_KEY, attributionTag(attribution));
         root.putBoolean("row_actor_synthetic", rowActorSynthetic);
+        putLastHit(root, evidence, rowKind);
         root.putBoolean(METADATA_UNAVAILABLE_KEY, true);
         return root;
     }
@@ -378,22 +495,39 @@ public final class EntityEventPayloadCodec {
             EntityDamageEvidence damage,
             EntityKillAttribution attribution,
             boolean rowActorSynthetic,
-            String metadataReason) {
+            String metadataReason,
+            WeaponIdentityReader identityReader) {
         String encoded = PREFIX + minimalPayload(
                 evidence,
                 rowKind,
                 damage,
                 attribution,
                 rowActorSynthetic,
-                metadataReason);
+                metadataReason,
+                identityReader);
         if (encoded.length() <= AuditSnbtParser.MAX_PAYLOAD_CHARS) {
             return encoded;
         }
+        return fixedEnvelope(evidence, rowKind, damage, attribution, rowActorSynthetic, metadataReason, identityReader);
+    }
 
+    /** Test seam (kill-weapon fix): the fixed-shape envelope; bounded identities cannot reach it through encode. */
+    static String fixedEnvelope(
+            CommittedEntityDeathEvidence evidence,
+            RowKind rowKind,
+            EntityDamageEvidence damage,
+            EntityKillAttribution attribution,
+            boolean rowActorSynthetic,
+            String metadataReason,
+            WeaponIdentityReader identityReader) {
         // This fixed-shape envelope is the final deterministic escape hatch.
         // Canonical victim identity remains in the schema-v1 subject column; the
         // payload states explicitly that oversized identity metadata was
-        // omitted instead of fabricating a different registry ID.
+        // omitted instead of fabricating a different registry ID. A weapon keeps
+        // only its bounded identity keys here (kill-weapon fix), so the envelope
+        // keeps a small fixed upper size. The "last hit by" note is left out on
+        // purpose: it carries a name of variable length, and the note is only an
+        // extra, so a row this far over the limit is stored with no note.
         CompoundTag root = new CompoundTag();
         root.putInt(VERSION_KEY, CURRENT_VERSION);
         root.putUUID(OPERATION_ID_KEY, evidence.operationId());
@@ -412,8 +546,13 @@ public final class EntityEventPayloadCodec {
         cause.putString("metadata_reason", metadataReason);
         cause.putBoolean("direct_entity_unavailable", damage.directEntityUnavailable());
         cause.putBoolean("causing_entity_unavailable", damage.causingEntityUnavailable());
-        cause.putBoolean("weapon_unavailable",
-                damage.suppliedWeaponUnavailable() || damage.hasSuppliedWeapon());
+        if (damage.hasSuppliedWeapon()) {
+            putWeaponIdentity(cause, damage.suppliedWeapon(), identityReader);
+            putWeaponSource(cause, damage);
+            cause.putString("weapon_metadata_reason", metadataReason);
+        }
+        cause.putBoolean("weapon_unavailable", damage.suppliedWeaponUnavailable()
+                || (damage.hasSuppliedWeapon() && !hasWeaponIdentity(cause)));
         root.put(DAMAGE_KEY, cause);
         CompoundTag storedAttribution = new CompoundTag();
         storedAttribution.putString("kind", storedProvenance(attribution.provenance()));
@@ -445,23 +584,140 @@ public final class EntityEventPayloadCodec {
             EntityDamageEvidence damage,
             boolean captureFullWeaponMetadata,
             WeaponPayloadEncoder weaponEncoder,
+            WeaponIdentityReader identityReader,
             String victimIdentity) {
         if (!damage.hasSuppliedWeapon()) return;
         ItemStack weapon = damage.suppliedWeapon();
+        // Kill-weapon fix: the bounded identity is written first and never depends on the weapon text parsing.
+        putWeaponIdentity(damageTag, weapon, identityReader);
+        putWeaponSource(damageTag, damage);
         try {
             String serialized = weaponEncoder.encode(weapon, captureFullWeaponMetadata);
+            // The re-parse stays (design 1.4): text the reader cannot parse is never stored.
             CompoundTag encodedWeapon = TagParser.parseTag(serialized);
             if (encodedWeapon.isEmpty()) {
                 throw new IllegalStateException("ItemStack audit codec returned an empty payload");
             }
             damageTag.put("weapon", encodedWeapon);
-        } catch (Exception | StackOverflowError failure) {
-            damageTag.putBoolean("weapon_unavailable", true);
+        } catch (Exception | LinkageError | StackOverflowError failure) {
+            putWeaponStub(damageTag, weapon, EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
+            damageTag.putBoolean("weapon_metadata_unavailable", true);
             damageTag.putString("weapon_metadata_reason", EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
             EventTrailNbtUtil.reportSerializationFailure(
                     "entity event weapon write",
                     weaponIdentity(weapon, victimIdentity),
                     failure);
+        }
+        markWeaponUnavailableIfNoIdentity(damageTag);
+    }
+
+    /**
+     * Kill-weapon fix, the too-large branch: a row with no supplied weapon is left as it is (it never claims one);
+     * otherwise the weapon text gives way to its bounded stub and the identity keys written before stay.
+     */
+    static void degradeOversizedWeapon(CompoundTag damageTag, EntityDamageEvidence damage) {
+        if (!damage.hasSuppliedWeapon()) return;
+        damageTag.remove("weapon");
+        putWeaponStub(damageTag, damage.suppliedWeapon(), EventTrailTextBounds.METADATA_REASON_TOO_LARGE);
+        damageTag.putBoolean("weapon_metadata_unavailable", true);
+        damageTag.putString("weapon_metadata_reason", EventTrailTextBounds.METADATA_REASON_TOO_LARGE);
+        markWeaponUnavailableIfNoIdentity(damageTag);
+    }
+
+    /** Kill-weapon fix seam: how a weapon's id, plain real name and rename are read (tests fake modded ids and names). */
+    interface WeaponIdentityReader {
+        /** The registry id, or null. */
+        String id(ItemStack stack);
+
+        /** The written-book label, else the game's name with any rename removed. */
+        String realName(ItemStack stack);
+
+        DisplayNameResolver.RenameState rename(ItemStack stack);
+    }
+
+    static final WeaponIdentityReader GAME_WEAPON_IDENTITY = new WeaponIdentityReader() {
+        @Override
+        public String id(ItemStack stack) {
+            return BuiltInRegistries.ITEM.getResourceKey(stack.getItem())
+                    .map(key -> key.location().toString())
+                    .orElse(null);
+        }
+
+        @Override
+        public String realName(ItemStack stack) {
+            String book = DisplayNameResolver.writtenBookLabel(stack);
+            return book != null ? book : DisplayNameResolver.gameName(stack);
+        }
+
+        @Override
+        public DisplayNameResolver.RenameState rename(ItemStack stack) {
+            return DisplayNameResolver.RenameState.ofStack(stack);
+        }
+    };
+
+    /**
+     * Kill-weapon fix: writes {@code weapon_id} (or {@code weapon_id_unavailable}), {@code weapon_name} (the plain real
+     * name, never the custom name) and the rename ({@code weapon_custom_name} or {@code weapon_rename_state}). Every
+     * value is bounded and a failing read is recorded, never thrown. {@code weapon_id_unavailable} is not
+     * {@link #METADATA_UNAVAILABLE_KEY}, which would mark the cause itself unavailable.
+     */
+    static void putWeaponIdentity(CompoundTag tag, ItemStack weapon, WeaponIdentityReader reader) {
+        String id = null;
+        try {
+            id = reader.id(weapon);
+        } catch (RuntimeException | LinkageError | StackOverflowError ignored) {
+            // Recorded as weapon_id_unavailable below.
+        }
+        if (id != null && !id.isBlank() && id.length() <= MAX_MINIMAL_TECHNICAL_ID_CHARS) {
+            tag.putString(WEAPON_ID_KEY, id);
+        } else {
+            tag.putBoolean(WEAPON_ID_UNAVAILABLE_KEY, true);
+        }
+        String name = null;
+        try {
+            name = reader.realName(weapon);
+        } catch (RuntimeException | LinkageError | StackOverflowError ignored) {
+            // No weapon_name; the stub's id still names the weapon on read.
+        }
+        name = safeText(name, null);
+        if (name != null) tag.putString(WEAPON_NAME_KEY, name);
+        DisplayNameResolver.RenameState rename;
+        try {
+            rename = reader.rename(weapon);
+        } catch (RuntimeException | LinkageError | StackOverflowError failure) {
+            rename = DisplayNameResolver.RenameState.CHECK_FAILED;
+        }
+        if (rename == null) rename = DisplayNameResolver.RenameState.NONE;
+        switch (rename.kind()) {
+            case TEXT -> tag.putString(WEAPON_CUSTOM_NAME_KEY, rename.text());   // RenameState bounds it to 100
+            case UNREADABLE -> tag.putString(WEAPON_RENAME_STATE_KEY, RENAME_STATE_UNREADABLE);
+            case CHECK_FAILED -> tag.putString(WEAPON_RENAME_STATE_KEY, RENAME_STATE_CHECK_FAILED);
+            case NONE -> { }
+        }
+    }
+
+    /** {@code weapon_source:"held"} for the killer's held item; nothing for the damage's own weapon (old rows match). */
+    private static void putWeaponSource(CompoundTag tag, EntityDamageEvidence damage) {
+        if (damage.suppliedWeaponHeld()) tag.putString(WEAPON_SOURCE_KEY, WEAPON_SOURCE_HELD);
+    }
+
+    /** The bounded stub under {@code weapon}; on any failure no compound is left and the identity keys still name it. */
+    private static void putWeaponStub(CompoundTag tag, ItemStack weapon, String reason) {
+        try {
+            tag.put("weapon", EventTrailNbtUtil.unavailableStackTag(weapon, reason));
+        } catch (RuntimeException | LinkageError | StackOverflowError failure) {
+            tag.remove("weapon");
+        }
+    }
+
+    private static boolean hasWeaponIdentity(CompoundTag tag) {
+        return tag.contains(WEAPON_ID_KEY, Tag.TAG_STRING) || tag.contains(WEAPON_NAME_KEY, Tag.TAG_STRING);
+    }
+
+    /** {@code weapon_unavailable} now means: a weapon existed and nothing that names it was stored. */
+    private static void markWeaponUnavailableIfNoIdentity(CompoundTag tag) {
+        if (!tag.contains("weapon", Tag.TAG_COMPOUND) && !hasWeaponIdentity(tag)) {
+            tag.putBoolean("weapon_unavailable", true);
         }
     }
 
@@ -634,56 +890,127 @@ public final class EntityEventPayloadCodec {
     static WeaponPresentation weaponPresentation(
             CompoundTag damage,
             java.util.function.Function<CompoundTag, EventTrailNbtUtil.StackDecodeResult> decoder) {
-        if (!damage.contains("weapon", Tag.TAG_COMPOUND)) {
+        // Kill-weapon fix: the stored identity keys come first; rows written before the fix have none.
+        String storedId = damage.contains(WEAPON_ID_KEY, Tag.TAG_STRING)
+                ? safeText(damage.getString(WEAPON_ID_KEY), null)
+                : null;
+        String storedName = damage.contains(WEAPON_NAME_KEY, Tag.TAG_STRING)
+                ? safeText(damage.getString(WEAPON_NAME_KEY), null)
+                : null;
+        boolean identityStored = storedId != null || storedName != null;
+        boolean hasCompound = damage.contains("weapon", Tag.TAG_COMPOUND);
+        boolean held = WEAPON_SOURCE_HELD.equals(damage.getString(WEAPON_SOURCE_KEY));
+        if (!hasCompound && !identityStored) {
             if (!damage.getBoolean("weapon_unavailable")) return null;
-            return new WeaponPresentation(
-                    1, null, "Unknown weapon", WeaponMetadataStatus.UNAVAILABLE);
+            return new WeaponPresentation(1, null, WEAPON_NOT_RECORDED, reasonStatus(damage), null, null, held);
         }
 
-        CompoundTag weapon = damage.getCompound("weapon");
-        EventTrailNbtUtil.StackDecodeResult decoded;
-        try {
-            decoded = decoder.apply(weapon);
-        } catch (RuntimeException | LinkageError failure) {
-            decoded = new EventTrailNbtUtil.StackDecodeResult(
-                    ItemStack.EMPTY, true, EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
-        }
-        if (decoded == null) {
-            decoded = new EventTrailNbtUtil.StackDecodeResult(
-                    ItemStack.EMPTY, true, EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
-        }
-
-        ItemStack stack = decoded.stack();
-        int count = weapon.contains("count") ? Math.max(0, weapon.getInt("count")) : 1;
-        String technicalIdentity = safeText(weapon.getString("id").replace("\"", ""), null);
-        String presentationIdentity = null;
-        if (stack != null && !stack.isEmpty()) {
-            count = Math.max(0, stack.getCount());
-            // A degraded weapon decodes to a plain stack without its components; it is named by its
-            // item type below (never e.g. "Uncraftable Potion"), and the presenter adds the note.
-            if (!decoded.metadataUnavailable()) presentationIdentity = DisplayNameResolver.stackDisplayName(stack);
+        int count = 1;
+        String technicalIdentity = null;
+        ItemStack captured = null;
+        WeaponMetadataStatus status;
+        if (hasCompound) {
+            CompoundTag weapon = damage.getCompound("weapon");
+            EventTrailNbtUtil.StackDecodeResult decoded;
             try {
-                var id = BuiltInRegistries.ITEM.getKey(stack.getItem());
-                if (id != null) technicalIdentity = id.toString();
-            } catch (RuntimeException | LinkageError ignored) {
-                // Retain the bounded technical identity from the encoded payload.
+                decoded = decoder.apply(weapon);
+            } catch (RuntimeException | LinkageError failure) {
+                decoded = new EventTrailNbtUtil.StackDecodeResult(
+                        ItemStack.EMPTY, true, EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
             }
+            if (decoded == null) {
+                decoded = new EventTrailNbtUtil.StackDecodeResult(
+                        ItemStack.EMPTY, true, EventTrailTextBounds.METADATA_REASON_CODEC_FAILURE);
+            }
+
+            ItemStack stack = decoded.stack();
+            count = weapon.contains("count") ? Math.max(0, weapon.getInt("count")) : 1;
+            technicalIdentity = safeText(weapon.getString("id").replace("\"", ""), null);
+            if (stack != null && !stack.isEmpty()) {
+                count = Math.max(0, stack.getCount());
+                // A degraded weapon decodes to a plain stack without its components; it is named by its
+                // item type below (never e.g. "Uncraftable Potion"), and the presenter adds the note.
+                if (!decoded.metadataUnavailable()) captured = stack;
+                try {
+                    var id = BuiltInRegistries.ITEM.getKey(stack.getItem());
+                    if (id != null) technicalIdentity = id.toString();
+                } catch (RuntimeException | LinkageError ignored) {
+                    // Retain the bounded technical identity from the encoded payload.
+                }
+            }
+            status = decoded.metadataUnavailable()
+                    ? (EventTrailTextBounds.METADATA_REASON_TOO_LARGE.equals(decoded.metadataReason())
+                        ? WeaponMetadataStatus.TOO_LARGE
+                        : WeaponMetadataStatus.UNAVAILABLE)
+                    : WeaponMetadataStatus.CAPTURED;
+        } else {
+            // The fixed envelope: the identity keys without a compound.
+            status = reasonStatus(damage);
+        }
+        if (storedId != null) technicalIdentity = storedId;
+
+        String realName = storedName;
+        if (realName == null && captured != null) realName = capturedRealName(captured);
+        if (realName == null) realName = safeText(DisplayNameResolver.itemDisplayName(technicalIdentity), null);
+        if (realName == null && technicalIdentity != null) realName = "Unresolved item (" + technicalIdentity + ')';
+
+        // A row written after the fix stores its rename even when the id and name reads failed.
+        boolean renameStored = damage.contains(WEAPON_CUSTOM_NAME_KEY, Tag.TAG_STRING)
+                || damage.contains(WEAPON_RENAME_STATE_KEY, Tag.TAG_STRING);
+        boolean fixedRow = identityStored || renameStored;
+        DisplayNameResolver.RenameState rename = fixedRow
+                ? storedRename(damage)
+                : captured != null ? DisplayNameResolver.RenameState.ofStack(captured)
+                : DisplayNameResolver.RenameState.NONE;
+
+        String presentationIdentity;
+        if (!fixedRow && captured != null) {
+            // A row written before the fix keeps exactly today's text.
+            presentationIdentity = DisplayNameResolver.stackDisplayName(captured);
+        } else {
+            presentationIdentity = realName == null ? null : composedName(realName, rename);
         }
         if (presentationIdentity == null || presentationIdentity.isBlank()) {
-            presentationIdentity = DisplayNameResolver.itemDisplayName(technicalIdentity);
+            presentationIdentity = realName != null ? realName : WEAPON_NOT_RECORDED;
         }
-        if (presentationIdentity == null || presentationIdentity.isBlank()) {
-            presentationIdentity = technicalIdentity == null
-                    ? "Unknown weapon"
-                    : "Unresolved item (" + technicalIdentity + ')';
-        }
-        WeaponMetadataStatus status = decoded.metadataUnavailable()
-                ? (EventTrailTextBounds.METADATA_REASON_TOO_LARGE.equals(decoded.metadataReason())
-                    ? WeaponMetadataStatus.TOO_LARGE
-                    : WeaponMetadataStatus.UNAVAILABLE)
-                : WeaponMetadataStatus.CAPTURED;
         return new WeaponPresentation(
-                Math.max(0, count), technicalIdentity, presentationIdentity, status);
+                Math.max(0, count), technicalIdentity, presentationIdentity, status, realName, rename, held);
+    }
+
+    /** The weapon status of a row with no weapon compound, from its stored reason. */
+    private static WeaponMetadataStatus reasonStatus(CompoundTag damage) {
+        return EventTrailTextBounds.METADATA_REASON_TOO_LARGE.equals(damage.getString("weapon_metadata_reason"))
+                ? WeaponMetadataStatus.TOO_LARGE
+                : WeaponMetadataStatus.UNAVAILABLE;
+    }
+
+    private static String capturedRealName(ItemStack stack) {
+        try {
+            String book = DisplayNameResolver.writtenBookLabel(stack);
+            return book != null ? book : safeText(DisplayNameResolver.gameName(stack), null);
+        } catch (RuntimeException | LinkageError failure) {
+            return null;
+        }
+    }
+
+    private static DisplayNameResolver.RenameState storedRename(CompoundTag damage) {
+        if (damage.contains(WEAPON_CUSTOM_NAME_KEY, Tag.TAG_STRING)) {
+            return DisplayNameResolver.RenameState.text(damage.getString(WEAPON_CUSTOM_NAME_KEY));
+        }
+        String state = damage.getString(WEAPON_RENAME_STATE_KEY);
+        if (RENAME_STATE_UNREADABLE.equals(state)) return DisplayNameResolver.RenameState.UNREADABLE;
+        if (RENAME_STATE_CHECK_FAILED.equals(state)) return DisplayNameResolver.RenameState.CHECK_FAILED;
+        return DisplayNameResolver.RenameState.NONE;
+    }
+
+    /** The stored parts in {@link DisplayNameResolver#stackDisplayName(ItemStack)}'s exact form. */
+    static String composedName(String real, DisplayNameResolver.RenameState rename) {
+        return switch (rename.kind()) {
+            case NONE -> real;
+            case TEXT -> real + " (renamed \"" + DisplayNameResolver.quoted(rename.text()) + "\")";
+            case UNREADABLE -> real + " (renamed, name unreadable)";
+            case CHECK_FAILED -> real + DisplayNameResolver.RENAME_CHECK_FAILED;
+        };
     }
 
     private static String weaponIdentity(ItemStack weapon, String fallback) {
@@ -871,7 +1198,8 @@ public final class EntityEventPayloadCodec {
             String killingPresentation,
             String viaPresentation,
             String retaliationName,
-            String retaliationEffect) {
+            String retaliationEffect,
+            String lastHitByPresentation) {
         public PresentationProjection {
             Objects.requireNonNull(rowKind, "rowKind");
             Objects.requireNonNull(subjectKind, "subjectKind");
@@ -905,17 +1233,45 @@ public final class EntityEventPayloadCodec {
         }
     }
 
+    /**
+     * A kill row's weapon. {@code technicalIdentity} is the registry id (the hover ID and the copy text);
+     * {@code presentationIdentity} the composed text the presenter prints, never blank; {@code realName} the plain
+     * real name, null only when the weapon was not recorded; {@code rename} its rename, never null; {@code held} that it
+     * is the killer's held item, not the damage's own weapon (kill-weapon fix; the presenter reads it "holding X").
+     */
     public record WeaponPresentation(
             int count,
             String technicalIdentity,
             String presentationIdentity,
-            WeaponMetadataStatus metadataStatus) {
+            WeaponMetadataStatus metadataStatus,
+            String realName,
+            DisplayNameResolver.RenameState rename,
+            boolean held) {
         public WeaponPresentation {
             if (count < 0) throw new IllegalArgumentException("Weapon count cannot be negative");
             if (presentationIdentity == null || presentationIdentity.isBlank()) {
                 throw new IllegalArgumentException("Weapon presentation must not be blank");
             }
             Objects.requireNonNull(metadataStatus, "metadataStatus");
+            rename = rename == null ? DisplayNameResolver.RenameState.NONE : rename;
+        }
+
+        /** The damage's own weapon, with its name parts. */
+        public WeaponPresentation(int count, String technicalIdentity, String presentationIdentity,
+                                  WeaponMetadataStatus metadataStatus, String realName,
+                                  DisplayNameResolver.RenameState rename) {
+            this(count, technicalIdentity, presentationIdentity, metadataStatus, realName, rename, false);
+        }
+
+        /** Today's shape: a weapon with no separate name parts. */
+        public WeaponPresentation(int count, String technicalIdentity, String presentationIdentity,
+                                  WeaponMetadataStatus metadataStatus) {
+            this(count, technicalIdentity, presentationIdentity, metadataStatus, null, null, false);
+        }
+
+        /** Whether anything that names the weapon was stored. */
+        public boolean recorded() {
+            return technicalIdentity != null || realName != null;
         }
     }
 

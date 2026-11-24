@@ -140,6 +140,16 @@ public final class NeoForgeEntityDeathAuditBridge {
                     causingUnavailable,
                     source,
                     damageTypeId);
+            // Kill-weapon fix: a held item only for a direct player hitter whose weapon read threw (resolveWeapon).
+            weapon = resolveWeapon(
+                    weapon,
+                    attribution,
+                    direct,
+                    directExtraction.unavailable(),
+                    causing,
+                    causingExtraction.unavailable(),
+                    deviceNamedPlayer,
+                    CommandCreditGuard.active());
             // Kill credit A: the wearer drop and the owner attach, after the command screen (lead ruling 4a).
             DeathRowParts row = deathRowParts(
                     attribution,
@@ -152,6 +162,10 @@ public final class NeoForgeEntityDeathAuditBridge {
                     deviceNamedPlayer,
                     KillRelatedPartyCapture.players(level.getServer()));
             boolean victimPlayerTracked = victimPlayerTracked(victim);
+            // Owner Q265 (a): the "last hit by" note, read after the attribution is final; it never changes it.
+            CommittedEntityDeathEvidence.LastHit lastHitBy = victimPlayerTracked
+                    ? safeLastHitNote(victim, row.attribution(), damageTypeId)
+                    : null;
 
             return Optional.of(new CommittedEntityDeathEvidence(
                     System.currentTimeMillis(),
@@ -168,11 +182,13 @@ public final class NeoForgeEntityDeathAuditBridge {
                             row.weapon(),
                             row.weaponUnavailable(),
                             directUnavailable,
-                            causingUnavailable),
+                            causingUnavailable,
+                            weapon.source()),
                     row.attribution(),
                     victimPlayerTracked,
                     CommittedEntityDeathEvidence.ProofKind
-                            .ACCEPTED_EVENT_AND_COMPLETED_DIE_OPERATION));
+                            .ACCEPTED_EVENT_AND_COMPLETED_DIE_OPERATION,
+                    lastHitBy));
         } catch (RuntimeException | LinkageError | StackOverflowError failure) {
             logFailure("capture entity-death evidence", failure);
             return Optional.empty();
@@ -344,20 +360,11 @@ public final class NeoForgeEntityDeathAuditBridge {
                                 : ActorProvenance.Causality.IMMEDIATE_SECONDARY)
                 : null;
 
-        // The platform adapter supplies engine credit only after proving that
-        // Minecraft's credited player is also the exact last attacking mob.
-        // Tame damage keeps the tame entity in that field, so owner promotion
-        // cannot cross this extraction boundary.
-        ActorProvenance exactEngineCredit = null;
-        LivingEntity killCredit = victim.getKillCredit();
-        if (killCredit instanceof Player player
-                && victim.getLastHurtByMob() == killCredit
-                && permitsEngineCredit(victim, damageTypeId)) {
-            exactEngineCredit = playerActor(
-                    player,
-                    ActorProvenance.Causality.IMMEDIATE_SECONDARY);
-        }
-
+        // Owner correction of 11-23 11:56 AM, final blow only: a kill is the player's only when their own attack or
+        // weapon does the final damage (their hit, their projectile, TNT they lit). Minecraft's kill credit for a later
+        // entityless death (a fall, lava, drowning, cactus, the void, or fire, a burn after their Fire Aspect or Flame
+        // hit included, per the Owner's Q262 C) is never read here, so such a death is recorded by its cause with no
+        // player, like other deaths with no player. No engine credit is supplied.
         return EntityKillAttributionClassifier.classify(
                 new EntityKillAttributionClassifier.SourceFacts(
                         sourceKind(
@@ -369,18 +376,83 @@ public final class NeoForgeEntityDeathAuditBridge {
                         sourceKind(causingExtraction, null, causingUnavailable, false),
                         sameDirectAndCausing,
                         causingPlayer,
-                        exactEngineCredit));
+                        null));
     }
 
     /**
      * Every exclusion that withholds Minecraft's entityless kill credit; package-private for the guard tests. Each
-     * guard can only withhold: none grants credit the exact last-attacker proof above would not.
+     * guard can only withhold: none grants credit. No fire tracking is built, per the Owner's Q262 C (11-23 1:10 PM): a
+     * burn death, even after a Fire Aspect or Flame hit, is a death by fire.
      */
+    // Unreachable for kill credit since final-blow-only (Owner 11-23 11:56 AM); only the Q265 (a) note calls it.
     static boolean permitsEngineCredit(LivingEntity victim, ResourceLocation finalDamageTypeId) {
         return IronsEngineCreditGuard.permitsEngineCredit(victim)
                 && ArsEngineCreditGuard.permitsEngineCredit(victim)
                 && FakePlayerAttackGuard.permitsEngineCredit(victim)
                 && AtomicReconstructorCreditGuard.permitsEngineCredit(finalDamageTypeId);
+    }
+
+    /**
+     * The game's own window for a victim's last attacker: vanilla forgets that attacker 100 game ticks after the hit
+     * (about 5 seconds at the normal 20 ticks per second; longer on a lagging server).
+     */
+    static final int LAST_HIT_WINDOW_TICKS = 100;
+
+    /**
+     * The note for {@link #capture}: any failure while reading it gives no note and leaves the death row as it is.
+     * Package-private for the failure test.
+     */
+    static CommittedEntityDeathEvidence.LastHit safeLastHitNote(
+            LivingEntity victim, EntityKillAttribution attribution, ResourceLocation damageTypeId) {
+        try {
+            return lastHitNote(victim, attribution, damageTypeId, NeoForgePlayerProvenance::isAdmittedPlayer);
+        } catch (RuntimeException | LinkageError | StackOverflowError failure) {
+            logFailure("capture last-hit note", failure);
+            return null;
+        }
+    }
+
+    /**
+     * The Owner's Q265 (a) (11-23 1:28 PM): a player who dies of a cause with no player credit (a fall, lava,
+     * drowning, a cactus, the void, fire, a burn after a Fire Aspect or Flame hit included) within the game's window
+     * after another player's hit gets "last hit by <player>" on their death row. It is a plain note, not a kill: the
+     * attribution is final before this runs and is not changed, no kill row is written, and nothing is indexed under
+     * the hitter. Read on the server thread at the death, from the game's own last-attacker fields; nothing is tracked.
+     *
+     * <p>No note when the death has player credit or is not entityless (only an ENVIRONMENT attribution qualifies);
+     * inside a command, or when the victim's last hit was made inside one (no rows for anything a command does); when
+     * the game names no player (no player hit, or the window passed); when the hitter is the victim; when a mob, a pet
+     * or another entity hit after the player (the player must be the game's very last attacker); when the last hit is
+     * older than {@link #LAST_HIT_WINDOW_TICKS}; under the Iron's, Ars, FakePlayer and Atomic Reconstructor guards of
+     * {@link #permitsEngineCredit}; and when the hitter is no admitted real player: a NeoForge FakePlayer, a mod's
+     * unlisted fake, or a player who left or respawned (the game also drops them as last attacker once they are gone).
+     * Package-private for the behaviour tests, which supply {@code admitted}.</p>
+     */
+    static CommittedEntityDeathEvidence.LastHit lastHitNote(
+            LivingEntity victim,
+            EntityKillAttribution attribution,
+            ResourceLocation damageTypeId,
+            Predicate<Player> admitted) {
+        if (!(victim instanceof Player)
+                || attribution == null
+                || attribution.provenance() != EntityKillAttribution.ProvenanceKind.ENVIRONMENT
+                || attribution.accountablePlayer() != null) {
+            return null;
+        }
+        if (CommandCreditGuard.active()) return null;
+        if (victim instanceof CommandEngineCreditCarrier carrier && carrier.eventtrail$commandEngineCreditExcluded()) {
+            return null;
+        }
+        if (!(victim.getKillCredit() instanceof Player hitter)) return null;
+        if (hitter == victim || victim.getUUID().equals(hitter.getUUID())) return null;
+        if (victim.getLastHurtByMob() != hitter) return null;
+        int age = victim.tickCount - victim.getLastHurtByMobTimestamp();
+        if (age < 0 || age > LAST_HIT_WINDOW_TICKS) return null;
+        if (!permitsEngineCredit(victim, damageTypeId)) return null;
+        if (hitter.isRemoved() || !admitted.test(hitter)) return null;
+        String name = hitter.getName().getString();
+        if (name == null || name.isBlank()) return null;
+        return new CommittedEntityDeathEvidence.LastHit(hitter.getUUID(), name);
     }
 
     /**
@@ -646,7 +718,77 @@ public final class NeoForgeEntityDeathAuditBridge {
         String get();
     }
 
-    private record WeaponCapture(ItemStack stack, boolean unavailable) {
+    /**
+     * Kill-weapon fix, the held fallback, applying the Owner's answers over design 3.3.4: the killer's held main-hand
+     * item is logged only when the damage carries no weapon and its own weapon read threw (Q204 A's case (b)), and only
+     * on a DIRECT_PLAYER row: then the player's own held item, only when the player hit for themselves (the direct
+     * entity is the causing entity, or there is none). Package-private for the behaviour tests; never throws.
+     * <p>The Owner's Q326 B: "No held item on rows that credit nobody; the held item still shows wherever a player is
+     * the direct hitter." So the fallback is allowed on DIRECT_PLAYER rows alone (lead decision D-528): every other
+     * kind, a mob's or a pet's own hit (NON_PLAYER_ENTITY, PET_OR_MINION) and an uncredited player row
+     * (UNSUPPORTED_SECONDARY) included, keeps the damage's own capture. Never when the damage has no direct entity:
+     * Q204 A's old case (a), a causing player with no direct hitter, credits nobody.</p>
+     * Never for Q199 A's cases (a projectile, a swap, TNT, a crystal or a spell entity delivered the damage: the row
+     * names that mechanism, and the launcher when the damage carries it) or K3 B's TNT: those rows have a direct entity
+     * that is not the hitter, and their provenances are refused below as well. A fall, lava, drowning or other
+     * entityless death after a hit is no player's kill (the Owner's final-blow correction of 11-23 11:56 AM) and is an
+     * ENVIRONMENT row; the ENGINE_KILL_CREDIT kind stays refused. Never on a RETALIATION or ENVIRONMENT row, under
+     * the Fix 4a or command redaction, inside a command scope, or when either source entity could not be read. A
+     * refused-frame row still drops the weapon in {@link #deathRowParts}. The held stack is copied here, on the server
+     * thread.
+     */
+    static WeaponCapture resolveWeapon(
+            WeaponCapture fromDamage,
+            EntityKillAttribution attribution,
+            Entity direct,
+            boolean directUnavailable,
+            Entity causing,
+            boolean causingUnavailable,
+            boolean redacted,
+            boolean commandScope) {
+        if (!fromDamage.stack().isEmpty() || redacted || commandScope || attribution == null
+                || directUnavailable || causingUnavailable) {
+            return fromDamage;
+        }
+        if (attribution.provenance() != EntityKillAttribution.ProvenanceKind.DIRECT_PLAYER) {
+            return fromDamage;                                              // Q326 B: only a direct player hitter
+        }
+        try {
+            LivingEntity holder = heldWeaponHolder(direct, causing, fromDamage.unavailable());
+            if (holder == null) return fromDamage;
+            ItemStack held = holder.getWeaponItem();
+            if (held == null || held.isEmpty()) return fromDamage;          // an empty hand: no weapon claimed
+            return new WeaponCapture(held.copy(), false, EntityDamageEvidence.WeaponSource.HELD);
+        } catch (RuntimeException | LinkageError | StackOverflowError failure) {
+            logFailure("capture held weapon", failure);
+            return fromDamage;
+        }
+    }
+
+    /**
+     * The player whose held item may stand in for the damage's weapon, or null (see {@link #resolveWeapon}): only a
+     * direct player hitter that hit for themselves, after the damage's own weapon read threw. A mob or a pet is never a
+     * holder, and no direct entity means no holder, whoever the causing entity is (the Owner's Q326 B, lead decision
+     * D-528). A device-named player is refused earlier, in {@link #resolveWeapon}, by its redaction flag.
+     */
+    static LivingEntity heldWeaponHolder(Entity direct, Entity causing, boolean damageWeaponReadThrew) {
+        if (damageWeaponReadThrew && direct instanceof Player hitter
+                && (causing == null || causing == direct)) {
+            return hitter;
+        }
+        return null;
+    }
+
+    record WeaponCapture(ItemStack stack, boolean unavailable, EntityDamageEvidence.WeaponSource source) {
+        WeaponCapture {
+            source = source == null || stack == null || stack.isEmpty()
+                    ? EntityDamageEvidence.WeaponSource.DAMAGE
+                    : source;
+        }
+
+        WeaponCapture(ItemStack stack, boolean unavailable) {
+            this(stack, unavailable, EntityDamageEvidence.WeaponSource.DAMAGE);
+        }
     }
 
     private record EntityExtraction(Entity entity, boolean unavailable) {

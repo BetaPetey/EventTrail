@@ -70,6 +70,7 @@ public final class EntityEventEvidenceNormalizer {
         return List.copyOf(rows);
     }
 
+    /** A synthetic victim's redacted form; it writes no death row, so it keeps no last-hit note. */
     private static CommittedEntityDeathEvidence withVictim(
             CommittedEntityDeathEvidence evidence,
             EntityIdentity victim) {

@@ -301,6 +301,10 @@ public final class AuditEntryPresenter {
             if (projection.sourceIdentityUnavailable()) {
                 detail += " (source identity unavailable)";
             }
+            // Owner Q265 (a): a plain note, never a kill; the codec gives it only on a no-credit death row.
+            if (projection.lastHitByPresentation() != null) {
+                detail += " • last hit by " + projection.lastHitByPresentation();
+            }
         }
         return appendWeapon(detail, projection.weapon());
     }
@@ -341,8 +345,9 @@ public final class AuditEntryPresenter {
             String detail,
             EntityEventPayloadCodec.WeaponPresentation weapon) {
         if (weapon == null) return detail;
-        String value = detail + " • " + weapon.count() + "× "
-                + weapon.presentationIdentity();
+        // Owner K2: a held-item weapon reads "holding X" from the start. The Owner's name rule (11-22): the weapon's
+        // plain name, with no count ("holding Diamond Sword", not "holding 1× Diamond Sword").
+        String value = detail + (weapon.held() ? " • holding " : " • ") + weapon.presentationIdentity();
         return switch (weapon.metadataStatus()) {
             case CAPTURED -> value;
             case UNAVAILABLE -> value + " (metadata unavailable)";

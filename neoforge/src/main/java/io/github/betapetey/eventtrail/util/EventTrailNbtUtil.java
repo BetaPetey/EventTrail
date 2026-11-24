@@ -169,13 +169,18 @@ public class EventTrailNbtUtil {
         return count > ITEM_CODEC_MAX_COUNT ? count : 0;
     }
 
+    /** Kill-weapon fix: the bounded {id, count, marker, reason} stub for a stack whose text cannot be stored. */
+    static CompoundTag unavailableStackTag(ItemStack stack, String reason) {
+        return fallbackStackTag(stack, reason);
+    }
+
     private static CompoundTag fallbackStackTag(ItemStack stack, String reason) {
         CompoundTag fallback = new CompoundTag();
         try {
             BuiltInRegistries.ITEM.getResourceKey(stack.getItem())
                     .map(key -> key.location().toString())
                     .ifPresent(id -> fallback.putString("id", id));
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             // Count and the explicit marker still truthfully preserve a partial audit record.
         }
         fallback.putInt("count", stack.getCount());

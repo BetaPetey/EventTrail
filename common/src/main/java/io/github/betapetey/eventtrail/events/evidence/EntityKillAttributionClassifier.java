@@ -57,6 +57,7 @@ public final class EntityKillAttributionClassifier {
         // genuinely entityless. If a device, projectile, pet, or other entity
         // delivered the final damage, a prior player hit must not be promoted
         // into ownership of that later physical action.
+        // Unreachable since final-blow-only (Owner 11-23 11:56 AM): the NeoForge bridge supplies no engine credit.
         if (facts.exactEngineKillCredit() != null
                 && facts.directKind() == SourceKind.NONE
                 && facts.causingKind() == SourceKind.NONE) {
