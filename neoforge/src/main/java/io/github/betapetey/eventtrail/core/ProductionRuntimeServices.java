@@ -231,11 +231,11 @@ final class ProductionRuntimeServices implements EventTrailRuntimeServices {
 
     @Override
     public void startMaintenance(ILogStorage storage, int retentionDays) {
-        if (retentionDays > 0 && !EventTrailMaintenance.start(
-                storage, retentionDays, serverFullyStarted, retentionHumanPlayers)) {
+        // At retention.days = 0 the worker runs only the operator's one-time purge and shrink.
+        if (!EventTrailMaintenance.start(storage, retentionDays, serverFullyStarted, retentionHumanPlayers)) {
             throw new IllegalStateException("Retention maintenance did not start");
         }
-        maintenanceActivity = retentionDays > 0 ? EventTrailMaintenance.activity() : null;
+        maintenanceActivity = EventTrailMaintenance.activity();
     }
 
     @Override

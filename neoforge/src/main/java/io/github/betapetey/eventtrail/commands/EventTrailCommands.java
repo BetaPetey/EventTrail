@@ -48,6 +48,7 @@ public final class EventTrailCommands {
                 .requires(ROOT_REQUIREMENT);
         InspectCommand.attach(root);
         ExtendedLookup.attach(root);
+        PurgeCommand.attach(root);
 
         LiteralCommandNode<CommandSourceStack> canonical = dispatcher.register(root);
 

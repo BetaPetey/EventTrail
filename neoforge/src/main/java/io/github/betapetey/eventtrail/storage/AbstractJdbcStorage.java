@@ -104,7 +104,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
     private static final long READ_SHUTDOWN_TIMEOUT_SECONDS = 2L;
     static final int RETENTION_DELETE_BATCH_SIZE = 1_000;
     static final long RETENTION_WORK_BUDGET_MILLIS = 30_000L;
-    private static final long RETENTION_BATCH_PAUSE_MILLIS = 10L;
+    static final long RETENTION_BATCH_PAUSE_MILLIS = 10L;
 
     protected final String serverId;
     private final SchemaV1RowCodec rowCodec;
@@ -4388,13 +4388,21 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
 
     @Override
     public final RetentionResult deleteOlderThanWithResult(long cutoffTimestamp, java.util.function.BooleanSupplier mayStartBatch) {
+        return deleteOlderThanWithResult(cutoffTimestamp, mayStartBatch, RetentionPace.STANDARD);
+    }
+
+    @Override
+    public final RetentionResult deleteOlderThanWithResult(long cutoffTimestamp, java.util.function.BooleanSupplier mayStartBatch,
+                                                           RetentionPace pace) {
         java.util.Objects.requireNonNull(mayStartBatch, "mayStartBatch");
+        java.util.Objects.requireNonNull(pace, "pace");
         try (EventTrailJdbcLogScope.Scope ignored = EventTrailJdbcLogScope.open()) {
-            return deleteOlderThanScoped(cutoffTimestamp, mayStartBatch);
+            return deleteOlderThanScoped(cutoffTimestamp, mayStartBatch, pace);
         }
     }
 
-    private RetentionResult deleteOlderThanScoped(long cutoffTimestamp, java.util.function.BooleanSupplier mayStartBatch) {
+    private RetentionResult deleteOlderThanScoped(long cutoffTimestamp, java.util.function.BooleanSupplier mayStartBatch,
+                                                  RetentionPace pace) {
         if (Thread.currentThread().isInterrupted()) {
             return new RetentionResult(0L, RetentionResult.Outcome.INTERRUPTED);
         }
@@ -4402,7 +4410,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
 
         long deletedTotal = 0L;
         long deadlineNanos = retentionNanoTime()
-                + TimeUnit.MILLISECONDS.toNanos(RETENTION_WORK_BUDGET_MILLIS);
+                + TimeUnit.MILLISECONDS.toNanos(pace.budgetMillis());
         RetentionResult.Outcome outcome;
         while (true) {
             if (Thread.currentThread().isInterrupted()) {
@@ -4428,7 +4436,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 break;
             }
             DeleteParts delete = buildRetentionDeleteBatchQuery(
-                    cutoffTimestamp, RETENTION_DELETE_BATCH_SIZE);
+                    cutoffTimestamp, pace.batchSize());
             int deleted = 0;
             boolean committed = false;
             try (AuxiliaryMutationOperation operation = admitAuxiliaryMutation();
@@ -4467,13 +4475,13 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
 
             deletedTotal += deleted;
             onRetentionBatchCommitted(deleted);
-            if (deleted < RETENTION_DELETE_BATCH_SIZE) {
+            if (deleted < pace.batchSize()) {
                 outcome = RetentionResult.Outcome.EXHAUSTED;
                 break;
             }
 
             try {
-                Thread.sleep(RETENTION_BATCH_PAUSE_MILLIS);
+                Thread.sleep(pace.pauseMillis());
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 outcome = RetentionResult.Outcome.INTERRUPTED;
@@ -4561,6 +4569,24 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 operation.statement.clear(statement);
             }
         }
+    }
+
+    /** The admin-started shrink after a purge (fixed SQL per backend, {@link TableShrink}); maintenance worker only. */
+    @Override
+    public final TableShrink.Plan planShrink() {
+        return TableShrink.plan(this);
+    }
+
+    @Override
+    public final TableShrink.Result shrink(TableShrink.Plan confirmed) {
+        return TableShrink.run(this, confirmed);
+    }
+
+    /** The disk spool when it can hold new records while the table is locked; null otherwise (the shrink refuses). */
+    final DiskSpool spoolForShrink() {
+        DiskSpool diskSpool = spool;
+        return diskSpool != null && diskSpool.state() == DiskSpool.State.READY && diskSpool.damagedReason() == null
+                && diskSpool.replayStoppedReason() == null ? diskSpool : null;
     }
 
     private void cancelAuxiliaryMutations() {

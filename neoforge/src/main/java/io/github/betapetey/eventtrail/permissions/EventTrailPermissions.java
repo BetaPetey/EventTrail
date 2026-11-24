@@ -57,12 +57,14 @@ import java.util.function.Supplier;
  */
 public final class EventTrailPermissions {
     public static final String STATUS_PERMISSION = "command.eventtrail.status";
+    public static final String PURGE_PERMISSION = "command.eventtrail.purge";
     private static final Logger LOGGER = LogManager.getLogger(EventTrailIds.MOD_ID);
     private static final String[] ROOT_NODES = {
             "command.eventtrail.inspect",
             "command.eventtrail.lookup",
             "command.eventtrail.status",
-            "command.eventtrail.page"
+            "command.eventtrail.page",
+            PURGE_PERMISSION
     };
     private static final String LUCKPERMS_PROVIDER = "net.luckperms.api.LuckPermsProvider";
 

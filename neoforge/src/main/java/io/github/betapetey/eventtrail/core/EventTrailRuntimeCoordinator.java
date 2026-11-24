@@ -145,12 +145,11 @@ public final class EventTrailRuntimeCoordinator {
             queryOwned = true;
             services.startQueryWork();
 
+            // Also at retention.days = 0, for the one-time purge and shrink commands only.
             int configuredRetentionDays = Math.max(0, retentionDays.getAsInt());
-            if (configuredRetentionDays > 0) {
-                phase = StartFailure.MAINTENANCE_START_FAILED;
-                maintenanceOwned = true;
-                services.startMaintenance(candidate.storage(), configuredRetentionDays);
-            }
+            phase = StartFailure.MAINTENANCE_START_FAILED;
+            maintenanceOwned = true;
+            services.startMaintenance(candidate.storage(), configuredRetentionDays);
 
             phase = StartFailure.STATUS_START_FAILED;
             statusOwned = true;

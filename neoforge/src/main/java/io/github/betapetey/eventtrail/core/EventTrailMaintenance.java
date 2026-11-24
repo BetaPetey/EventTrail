@@ -1,7 +1,9 @@
 package io.github.betapetey.eventtrail.core;
 
 import io.github.betapetey.eventtrail.storage.ILogStorage;
+import io.github.betapetey.eventtrail.storage.RetentionPace;
 import io.github.betapetey.eventtrail.storage.RetentionResult;
+import io.github.betapetey.eventtrail.storage.TableShrink;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -13,15 +15,29 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
-/** One lifecycle-owned retention worker, with cooperative player-priority idle admission. */
+/**
+ * One lifecycle-owned retention worker, with cooperative player-priority idle admission. While players are online
+ * the same worker deletes expired rows at {@link RetentionPace#GENTLE}; operator purge and shrink requests run on
+ * it too, one at a time. The server thread only publishes activity and submits: it never runs SQL or waits.
+ * At retention.days = 0 the worker runs no retention pass at all, only those operator requests.
+ */
 public final class EventTrailMaintenance {
     private static final Logger LOGGER = LogManager.getLogger("eventtrail");
     static final int MAINTENANCE_WORKERS = 1;
     static final int MAINTENANCE_QUEUE_CAPACITY = 1;
     static final long IDLE_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
     static final long IDLE_RECHECK_NANOS = TimeUnit.MINUTES.toNanos(30);
+    /** While players are online and expired rows may remain: the gap between two gentle passes. */
+    static final long BUSY_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+
+    enum PassKind { STARTUP, IDLE, BUSY, COMMAND }
+
+    /** How an operator request was taken. */
+    public enum Admission { QUEUED, BUSY, UNAVAILABLE }
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 2L;
     private static final AtomicInteger THREAD_ID = new AtomicInteger();
     private static final Object LIFECYCLE_LOCK = new Object();
@@ -49,7 +65,8 @@ public final class EventTrailMaintenance {
         if (recognizedHumanPlayers < 0) throw new IllegalArgumentException("Recognized human count must not be negative");
         Objects.requireNonNull(nanoClock, "nanoClock");
         Objects.requireNonNull(wallClock, "wallClock");
-        if (storage == null || retentionDays <= 0 || !storage.isReady()) return false;
+        // retention.days = 0 (keep forever): the worker runs operator requests only, never a retention pass.
+        if (storage == null || retentionDays < 0 || !storage.isReady()) return false;
         synchronized (LIFECYCLE_LOCK) {
             if (current != null) return false;
             reapRetiredLocked();
@@ -125,13 +142,89 @@ public final class EventTrailMaintenance {
                     tryStartPendingLocked(lifecycle);
                     return;
                 }
+                // Constant time: the remaining checks read fields only; any work goes to the worker.
                 armGraceLocked(lifecycle);
-                if (lifecycle.passInFlight || !idleEligibleLocked(lifecycle)) return;
+                if (lifecycle.passInFlight) return;
+                if (lifecycle.pendingCommand != null) {
+                    submitCommandLocked(lifecycle);
+                    return;
+                }
+                if (busyEligibleLocked(lifecycle)) {
+                    submitLocked(lifecycle, PassKind.BUSY);
+                    return;
+                }
+                if (!idleEligibleLocked(lifecycle)) return;
                 long now = lifecycle.nanoClock.getAsLong();
                 if (lifecycle.recheckArmed && now - lifecycle.recheckDueNanos < 0L) return;
-                submitLocked(lifecycle, true);
+                submitLocked(lifecycle, PassKind.IDLE);
             }
         }
+    }
+
+    // ---- operator requests (purge and shrink commands) --------------------------------------------------------------
+
+    /** One operator request; {@code done} runs on the retention worker once, with the outcome. */
+    private record Command(Kind kind, int days, TableShrink.Plan confirmed, Consumer<Object> done) {
+        enum Kind { PURGE, PLAN_SHRINK, SHRINK }
+    }
+
+    /** The cleanup now, for history older than {@code days}; at the gentle pace while players are online. */
+    public static Admission requestPurge(ILogStorage expectedStorage, int days, Consumer<RetentionResult> done) {
+        if (days <= 0) throw new IllegalArgumentException("Purge days must be positive");
+        Objects.requireNonNull(done, "done");
+        return request(expectedStorage, new Command(Command.Kind.PURGE, days, null, result -> done.accept((RetentionResult) result)));
+    }
+
+    /** Measures what a shrink needs; nothing is changed. */
+    public static Admission requestShrinkPlan(ILogStorage expectedStorage, Consumer<TableShrink.Plan> done) {
+        Objects.requireNonNull(done, "done");
+        return request(expectedStorage, new Command(Command.Kind.PLAN_SHRINK, 0, null, plan -> done.accept((TableShrink.Plan) plan)));
+    }
+
+    /** Runs a confirmed shrink; the storage measures again first and refuses when the space no longer fits. */
+    public static Admission requestShrink(ILogStorage expectedStorage, TableShrink.Plan confirmed,
+                                          Consumer<TableShrink.Result> done) {
+        Objects.requireNonNull(confirmed, "confirmed");
+        Objects.requireNonNull(done, "done");
+        return request(expectedStorage, new Command(Command.Kind.SHRINK, 0, confirmed, result -> done.accept((TableShrink.Result) result)));
+    }
+
+    /** The running lifecycle's generation, or -1 with none; a confirm from an older generation is void. */
+    public static long lifecycleGenerationOrNone() {
+        synchronized (LIFECYCLE_LOCK) {
+            return current == null ? -1L : current.generation;
+        }
+    }
+
+    /** True while an operator request waits or runs (status and command replies only). */
+    public static boolean operatorRequestPending() {
+        synchronized (LIFECYCLE_LOCK) {
+            Lifecycle lifecycle = current;
+            return lifecycle != null && (lifecycle.pendingCommand != null || lifecycle.commandInFlight);
+        }
+    }
+
+    /** Constant time, no I/O: the request waits in one field and the next tick or the free worker starts it. */
+    private static Admission request(ILogStorage expectedStorage, Command command) {
+        synchronized (LIFECYCLE_LOCK) {
+            Lifecycle lifecycle = current;
+            if (lifecycle == null || lifecycle.storage != expectedStorage) return Admission.UNAVAILABLE;
+            if (lifecycle.pendingCommand != null || lifecycle.commandInFlight) return Admission.BUSY;
+            lifecycle.pendingCommand = command;
+            if (lifecycle.startupDispatched && !lifecycle.passInFlight) submitCommandLocked(lifecycle);
+            return Admission.QUEUED;
+        }
+    }
+
+    private static void submitCommandLocked(Lifecycle lifecycle) {
+        if (lifecycle != current || lifecycle.passInFlight || lifecycle.pendingCommand == null) return;
+        Command command = lifecycle.pendingCommand;
+        lifecycle.pendingCommand = null;
+        lifecycle.commandInFlight = true;
+        lifecycle.passInFlight = true;
+        lifecycle.taskCompleted = false;
+        long epoch = lifecycle.activityEpoch;
+        lifecycle.activeTask = lifecycle.executor.submit(() -> runPass(lifecycle, epoch, PassKind.COMMAND, command));
     }
 
     private static void tryStartPendingLocked(Lifecycle lifecycle) {
@@ -140,15 +233,33 @@ public final class EventTrailMaintenance {
                 TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(MAINTENANCE_QUEUE_CAPACITY),
                 maintenanceThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
         lifecycle.startupDispatched = true;
-        submitLocked(lifecycle, false);
+        submitLocked(lifecycle, PassKind.STARTUP);
     }
 
-    private static void submitLocked(Lifecycle lifecycle, boolean idle) {
-        if (lifecycle != current || lifecycle.passInFlight) return;
+    /** Startup, idle and busy retention passes; none at retention.days = 0, where only operator requests run. */
+    private static void submitLocked(Lifecycle lifecycle, PassKind kind) {
+        if (lifecycle != current || lifecycle.passInFlight || lifecycle.retentionDays <= 0) return;
         lifecycle.passInFlight = true;
         lifecycle.taskCompleted = false;
         long epoch = lifecycle.activityEpoch;
-        lifecycle.activeTask = lifecycle.executor.submit(() -> runRetention(lifecycle, epoch, idle));
+        lifecycle.activeTask = lifecycle.executor.submit(() -> runPass(lifecycle, epoch, kind, null));
+    }
+
+    private static boolean busyEligibleLocked(Lifecycle lifecycle) {
+        return lifecycle.startupSettled && lifecycle.fullyStarted && lifecycle.recognizedHumanPlayers > 0
+                && lifecycle.busyArmed && lifecycle.nanoClock.getAsLong() - lifecycle.busyDueNanos >= 0L;
+    }
+
+    /** A busy pass continues only while players are online; a stop or a not-started server withdraws it. */
+    private static boolean mayStartBusyBatch(Lifecycle lifecycle) {
+        synchronized (LIFECYCLE_LOCK) {
+            return current == lifecycle && lifecycle.fullyStarted && lifecycle.recognizedHumanPlayers > 0;
+        }
+    }
+
+    /** The pace for the next part of a purge: gentle while anyone is online. */
+    private static RetentionPace purgePaceLocked(Lifecycle lifecycle) {
+        return lifecycle.recognizedHumanPlayers > 0 ? RetentionPace.GENTLE : RetentionPace.STANDARD;
     }
 
     private static void armGraceLocked(Lifecycle lifecycle) {
@@ -206,33 +317,54 @@ public final class EventTrailMaintenance {
         if (retiredExecutor != null && retiredExecutor.isTerminated()) retiredExecutor = null;
     }
 
-    private static void runRetention(Lifecycle lifecycle, long epoch, boolean idle) {
+    private static void runPass(Lifecycle lifecycle, long epoch, PassKind kind, Command command) {
         lastWorkerThreadName = Thread.currentThread().getName();
+        boolean idle = kind == PassKind.IDLE;
         long cutoff = 0L;
         RetentionResult result = new RetentionResult(0L, RetentionResult.Outcome.FAILED);
+        // A measure or a shrink deletes nothing: it reports no retention result and keeps the last one.
+        boolean retentionPass = command == null || command.kind() == Command.Kind.PURGE;
+        // Set before the work, so even an Error that escapes it leaves the operator a reply.
+        Object commandOutcome = failedOutcome(command, result);
         try {
-            cutoff = lifecycle.wallClock.getAsLong() - lifecycle.retentionDays * 24L * 60L * 60L * 1000L;
-            LOGGER.info("Running bounded EventTrail {} retention maintenance for history older than {} days",
-                    idle ? "idle" : "startup", lifecycle.retentionDays);
-            result = Objects.requireNonNull(lifecycle.storage.deleteOlderThanWithResult(
-                    cutoff, () -> mayStartBatch(lifecycle, epoch, idle)), "retention result");
-            logResult(lifecycle, result);
+            if (command != null && command.kind() == Command.Kind.PLAN_SHRINK) {
+                commandOutcome = lifecycle.storage.planShrink();
+            } else if (command != null && command.kind() == Command.Kind.SHRINK) {
+                commandOutcome = lifecycle.storage.shrink(command.confirmed());
+            } else if (command != null) {
+                cutoff = lifecycle.wallClock.getAsLong() - command.days() * 24L * 60L * 60L * 1000L;
+                LOGGER.info("Running the EventTrail purge an operator confirmed, for history older than {} days",
+                        command.days());
+                result = purge(lifecycle, cutoff);
+                commandOutcome = result;
+                logResult(lifecycle, result);
+            } else {
+                cutoff = automaticCutoff(lifecycle.retentionDays, lifecycle.wallClock.getAsLong());
+                LOGGER.info("Running bounded EventTrail {} retention maintenance for history older than {} days",
+                        kind.name().toLowerCase(java.util.Locale.ROOT), lifecycle.retentionDays);
+                BooleanSupplier admission = kind == PassKind.BUSY ? () -> mayStartBusyBatch(lifecycle)
+                        : () -> mayStartBatch(lifecycle, epoch, idle);
+                result = Objects.requireNonNull(lifecycle.storage.deleteOlderThanWithResult(cutoff, admission,
+                        kind == PassKind.BUSY ? RetentionPace.GENTLE : RetentionPace.STANDARD), "retention result");
+                logResult(lifecycle, result);
+            }
         } catch (RuntimeException failure) {
             LOGGER.error("EventTrail retention maintenance failed for lifecycle {}; cleanup remains eligible for a later idle check ({}).",
                     lifecycle.generation, EventTrailDiagnostics.safeFailureSummary(failure));
+            commandOutcome = failedOutcome(command, result);
         } finally {
             try {
                 boolean stillCurrent;
                 synchronized (LIFECYCLE_LOCK) {
                     stillCurrent = current == lifecycle;
-                    if (stillCurrent) {
+                    if (stillCurrent && retentionPass) {
                         lifecycle.lastOutcome = result.outcome();
                         lifecycle.lastDeletedCount = result.deletedCount();
                         lifecycle.lastCutoffTimestamp = cutoff;
                         lifecycle.lastRetentionCompletedAtMillis = Math.max(0L, lifecycle.wallClock.getAsLong());
                     }
                 }
-                if (stillCurrent) {
+                if (stillCurrent && retentionPass) {
                     try {
                         // Separate observation/result boundary. Startup is never idle-admitted, even if empty.
                         // The current maintenance body remains owned/in-flight until this call settles.
@@ -248,10 +380,23 @@ public final class EventTrailMaintenance {
                     // Old completions report their own outcome but cannot arm or modify a successor.
                     if (current == lifecycle) {
                         lifecycle.passInFlight = false;
+                        lifecycle.commandInFlight = false;
                         lifecycle.taskCompleted = true;
                         lifecycle.activeTask = null;
                         lifecycle.completedPasses++;
-                        if (!idle) {
+                        if (retentionPass) {
+                            // Rows may remain after a budget or a yield: the next gentle pass comes soon.
+                            boolean rowsMayRemain = result.outcome() == RetentionResult.Outcome.BUDGET_EXHAUSTED
+                                    || result.outcome() == RetentionResult.Outcome.YIELDED;
+                            lifecycle.busyArmed = true;
+                            lifecycle.busyDueNanos = lifecycle.nanoClock.getAsLong()
+                                    + (rowsMayRemain ? BUSY_INTERVAL_NANOS : IDLE_RECHECK_NANOS);
+                        }
+                        if (kind == PassKind.BUSY) {
+                            lifecycle.completedBusyPasses++;
+                        } else if (kind == PassKind.COMMAND) {
+                            lifecycle.completedCommandPasses++;
+                        } else if (!idle) {
                             lifecycle.startupSettled = true;
                         } else {
                             lifecycle.completedIdlePasses++;
@@ -267,7 +412,69 @@ public final class EventTrailMaintenance {
                         armGraceLocked(lifecycle);
                     }
                 }
+                // After the bookkeeping, so a follow-up request (shrink after purge) finds the worker free.
+                if (command != null) {
+                    try {
+                        command.done().accept(commandOutcome);
+                    } catch (RuntimeException replyFailure) {
+                        LOGGER.warn("EventTrail could not deliver an operator maintenance reply ({}).",
+                                EventTrailDiagnostics.safeFailureSummary(replyFailure));
+                    }
+                }
             }
+        }
+    }
+
+    /**
+     * The cutoff of an automatic (startup, idle or busy) retention pass. A second guard behind the one in
+     * submitLocked: at retention.days = 0 (keep forever) the cutoff would be now, so no automatic pass may run.
+     */
+    static long automaticCutoff(int retentionDays, long nowMillis) {
+        if (retentionDays <= 0) {
+            throw new IllegalStateException("no automatic retention pass at retention.days = " + retentionDays);
+        }
+        return nowMillis - retentionDays * 24L * 60L * 60L * 1000L;
+    }
+
+    /** The reply to an operator request whose work failed unexpectedly; null for a retention pass. */
+    private static Object failedOutcome(Command command, RetentionResult result) {
+        if (command == null) return null;
+        return switch (command.kind()) {
+            case PLAN_SHRINK -> TableShrink.Plan.refuse(TableShrink.Backend.UNSUPPORTED,
+                    "the measure failed unexpectedly; see the server log");
+            case SHRINK -> TableShrink.Result.notRun("the shrink failed unexpectedly");
+            case PURGE -> result;
+        };
+    }
+
+    /**
+     * The confirmed purge: bounded parts until no expired row is left. Each part takes the gentle pace while
+     * players are online; a standard part yields at a join and the next part continues gently. Only a stop ends it.
+     */
+    private static RetentionResult purge(Lifecycle lifecycle, long cutoff) {
+        long deleted = 0L;
+        while (true) {
+            RetentionPace pace;
+            synchronized (LIFECYCLE_LOCK) {
+                if (current != lifecycle) return new RetentionResult(deleted, RetentionResult.Outcome.INTERRUPTED);
+                pace = purgePaceLocked(lifecycle);
+            }
+            boolean gentle = pace == RetentionPace.GENTLE;
+            RetentionResult part = Objects.requireNonNull(lifecycle.storage.deleteOlderThanWithResult(cutoff,
+                    () -> mayContinuePurge(lifecycle, gentle), pace), "purge result");
+            deleted += part.deletedCount();
+            boolean continues = part.outcome() == RetentionResult.Outcome.BUDGET_EXHAUSTED
+                    || part.outcome() == RetentionResult.Outcome.YIELDED;
+            if (!continues || Thread.currentThread().isInterrupted()) {
+                return new RetentionResult(deleted, part.outcome() == RetentionResult.Outcome.YIELDED
+                        ? RetentionResult.Outcome.INTERRUPTED : part.outcome());
+            }
+        }
+    }
+
+    private static boolean mayContinuePurge(Lifecycle lifecycle, boolean gentle) {
+        synchronized (LIFECYCLE_LOCK) {
+            return current == lifecycle && (gentle || lifecycle.recognizedHumanPlayers == 0);
         }
     }
 
@@ -318,7 +525,10 @@ public final class EventTrailMaintenance {
                     lifecycle == null ? null : lifecycle.lastOutcome, lifecycle == null ? 0 : lifecycle.lastDeletedCount,
                     lifecycle == null ? 0 : lifecycle.lastCutoffTimestamp, lifecycle == null ? 0 : lifecycle.idleGraceDueNanos,
                     lifecycle == null || !lifecycle.recheckArmed ? 0 : lifecycle.recheckDueNanos,
-                    lifecycle != null && !lifecycle.startupDispatched && retiredExecutor != null);
+                    lifecycle != null && !lifecycle.startupDispatched && retiredExecutor != null,
+                    lifecycle == null ? 0 : lifecycle.completedBusyPasses,
+                    lifecycle == null ? 0 : lifecycle.completedCommandPasses,
+                    lifecycle == null || !lifecycle.busyArmed ? 0 : lifecycle.busyDueNanos);
         }
     }
 
@@ -327,7 +537,8 @@ public final class EventTrailMaintenance {
                             String lastWorkerThreadName, boolean startupSettled, boolean fullyStarted, int recognizedHumanPlayers,
                             boolean graceArmed, boolean passInFlight, long completedPasses, long completedIdlePasses,
                             RetentionResult.Outcome lastOutcome, long lastDeletedCount, long lastCutoffTimestamp,
-                            long idleGraceDueNanos, long recheckDueNanos, boolean waitingForRetired) {}
+                            long idleGraceDueNanos, long recheckDueNanos, boolean waitingForRetired,
+                            long completedBusyPasses, long completedCommandPasses, long busyDueNanos) {}
 
     private static final class Lifecycle {
         final long generation;
@@ -351,6 +562,12 @@ public final class EventTrailMaintenance {
         long recheckDueNanos;
         long completedPasses;
         long completedIdlePasses;
+        long completedBusyPasses;
+        long completedCommandPasses;
+        boolean busyArmed;
+        long busyDueNanos;
+        Command pendingCommand;
+        boolean commandInFlight;
         RetentionResult.Outcome lastOutcome;
         long lastDeletedCount;
         long lastCutoffTimestamp;

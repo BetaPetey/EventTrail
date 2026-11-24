@@ -37,6 +37,7 @@ final class EventTrailPermissionNodes {
             "command.eventtrail.lookup.global",
             "command.eventtrail.lookup.world",
             "command.eventtrail.page",
+            "command.eventtrail.purge",
             "command.eventtrail.status",
             "command.eventtrail.teleport");
 

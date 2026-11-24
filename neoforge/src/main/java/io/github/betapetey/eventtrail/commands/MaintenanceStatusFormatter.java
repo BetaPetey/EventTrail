@@ -104,14 +104,14 @@ final class MaintenanceStatusFormatter {
         return switch (snapshot.capability()) {
             case MIGRATION_REQUIRED -> legacyNoneExplanation();
             case FULL_MODE_UNCHANGED -> List.of("§7Existing FULL auto-vacuum mode is preserved. EventTrail does not switch that database policy or enable incremental work.");
-            case INCREMENTAL_CAPABLE -> List.of("§7Qualified incremental work requires successful retention, material free space and safe idle admission. Each episode retains half its initial free pool; work is gradual, never a full VACUUM.");
+            case INCREMENTAL_CAPABLE -> List.of("§7Qualified incremental work requires successful retention, material free space and safe idle admission. Each episode retains half its initial free pool; work is gradual. Automatic maintenance never runs a full VACUUM; a full VACUUM runs only when an admin uses /eventtrail purge shrink.");
             case EXTERNAL_DBA_MANAGED -> List.of(
                     snapshot.backend() == StorageMaintenanceSnapshot.Backend.MYSQL
-                            ? "§7InnoDB manages purge/reuse. EventTrail does not issue OPTIMIZE TABLE; rebuilds are DBA-managed."
-                            : "§7PostgreSQL/DBA policy manages autovacuum/autoanalyze and reuse. EventTrail does not issue VACUUM, ANALYZE or VACUUM FULL.",
+                            ? "§7InnoDB manages purge/reuse. Automatic maintenance never runs OPTIMIZE TABLE; OPTIMIZE TABLE runs only when an admin uses /eventtrail purge shrink. Other rebuilds are DBA-managed."
+                            : "§7PostgreSQL/DBA policy manages autovacuum/autoanalyze and reuse. Automatic maintenance never runs VACUUM, ANALYZE or VACUUM FULL; VACUUM FULL runs only when an admin uses /eventtrail purge shrink.",
                     "§7External allocation belongs to the whole shared table/relation, not this server ID; precise per-server reclaimable bytes are unavailable.");
             case UNSUPPORTED_RUNTIME -> List.of("§7Reclamation is unavailable for this runtime; supported ordinary retention/storage remains independent.");
-            case UNQUALIFIED_LAYOUT -> List.of("§7Automatic reclamation requires the qualified 4096-byte page layout; this file is preserved without rewriting it.");
+            case UNQUALIFIED_LAYOUT -> List.of("§7Automatic reclamation requires the qualified 4096-byte page layout; automatic maintenance preserves this file without rewriting it; only /eventtrail purge shrink rewrites it, and it keeps the same page layout.");
             case UNKNOWN -> List.of("§7Reclamation capability is unknown; no mode or reclaimability is assumed.");
             case UNRECOGNIZED_OBJECTS -> List.of("§7Unexpected database objects prevent whole-file reclamation. Administrator review is required; objects are not changed and ordinary supported storage remains available.");
         };

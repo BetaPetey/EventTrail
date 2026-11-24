@@ -134,6 +134,23 @@ public interface ILogStorage {
         throw new UnsupportedOperationException("Storage does not support cooperative retention admission");
     }
 
+    /** The same pass at an explicit batch size, pause and budget; a storage without pacing runs its own pass. */
+    default RetentionResult deleteOlderThanWithResult(long cutoffTimestamp, BooleanSupplier mayStartBatch,
+                                                      RetentionPace pace) {
+        Objects.requireNonNull(pace, "pace");
+        return deleteOlderThanWithResult(cutoffTimestamp, mayStartBatch);
+    }
+
+    /** Measures an admin-started table shrink; called on the retention worker only, never on the server thread. */
+    default TableShrink.Plan planShrink() {
+        return TableShrink.Plan.unsupported();
+    }
+
+    /** Runs a shrink the admin confirmed; it measures again first and refuses when the space no longer fits. */
+    default TableShrink.Result shrink(TableShrink.Plan confirmed) {
+        return TableShrink.Result.notRun("this storage cannot shrink its table");
+    }
+
     void close();
 
     boolean isReady();

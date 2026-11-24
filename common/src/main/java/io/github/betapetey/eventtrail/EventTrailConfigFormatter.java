@@ -296,11 +296,13 @@ public final class EventTrailConfigFormatter {
             case "retention.days" -> {
                 writer.write("# Keep history for 90 days by default; 0 disables cleanup.");
                 writer.newLine();
-                writer.write("# Bounded startup cleanup; online catch-up starts after 5 minutes with no real players.");
+                writer.write("# Bounded startup cleanup; full-speed catch-up starts after 5 minutes with no real players.");
                 writer.newLine();
-                writer.write("# Player joins pause further batches; exhausted idle cleanup rechecks after 30 minutes.");
+                writer.write("# With players online it goes on gently (small batches, pauses); rechecks after 30 minutes.");
                 writer.newLine();
                 writer.write("# Deleting rows does not guarantee immediate filesystem shrinkage.");
+                writer.newLine();
+                writer.write("# Operators: /eventtrail purge [days] cleans up now; /eventtrail purge shrink gives space back.");
                 writer.newLine();
             }
             case "retention.reclaim.enabled" -> {
@@ -312,7 +314,7 @@ public final class EventTrailConfigFormatter {
                 writer.newLine();
                 writer.write("# retention.days=0 also disables automatic reclaim; new-file incremental capability remains.");
                 writer.newLine();
-                writer.write("# Existing SQLite modes are preserved; no full VACUUM or MySQL/PostgreSQL maintenance SQL.");
+                writer.write("# Existing SQLite modes are preserved; automatic reclaim never runs a full VACUUM or MySQL/PostgreSQL maintenance SQL; only /eventtrail purge shrink does.");
                 writer.newLine();
             }
             case "inspect.pageSize" -> {
