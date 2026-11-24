@@ -1,7 +1,7 @@
-package io.github.betapetey.eventtrail.compat;
+package io.github.betapetey.eventtrail.adapters;
 
 import io.github.betapetey.eventtrail.EventTrailIds;
-import io.github.betapetey.eventtrail.compat.hooks.HookVerdicts;
+import io.github.betapetey.eventtrail.adapters.hooks.HookVerdicts;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.WarningReason;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;

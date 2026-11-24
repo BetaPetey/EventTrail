@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.mixin.occultism;
 
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.hooks.HookGuard;
-import io.github.betapetey.eventtrail.compat.hooks.HookSite;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.hooks.HookGuard;
+import io.github.betapetey.eventtrail.adapters.hooks.HookSite;
 import io.github.betapetey.eventtrail.inventory.adapters.occultism.OccultismStorageLinkAccess;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Pseudo;

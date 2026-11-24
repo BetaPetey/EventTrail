@@ -1,10 +1,10 @@
 package io.github.betapetey.eventtrail.inventory.spi;
 
 import io.github.betapetey.eventtrail.EventTrailIds;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.ContainerLabelFallbacks;
-import io.github.betapetey.eventtrail.compat.FailureClassifier;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.ContainerLabelFallbacks;
+import io.github.betapetey.eventtrail.adapters.FailureClassifier;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTarget;
 import io.github.betapetey.eventtrail.inventory.core.InventorySlotRole;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility;

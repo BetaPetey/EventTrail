@@ -2,9 +2,9 @@ package io.github.betapetey.eventtrail.inventory.adapters.occultism;
 
 import com.klikli_dev.occultism.common.blockentity.StorageControllerBlockEntity;
 import com.klikli_dev.occultism.common.container.storage.*;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.RecordingGaps;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.RecordingGaps;
 import io.github.betapetey.eventtrail.events.EventTrailEventHandler;
 import io.github.betapetey.eventtrail.events.UniversalContainerTracker;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalMenuAdapterLoader;

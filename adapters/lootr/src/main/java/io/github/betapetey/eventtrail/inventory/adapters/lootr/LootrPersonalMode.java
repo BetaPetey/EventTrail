@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.inventory.adapters.lootr;
 
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.FailureClassifier;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.FailureClassifier;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;

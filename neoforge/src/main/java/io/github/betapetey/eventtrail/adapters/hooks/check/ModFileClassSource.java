@@ -1,4 +1,4 @@
-package io.github.betapetey.eventtrail.compat.hooks.check;
+package io.github.betapetey.eventtrail.adapters.hooks.check;
 
 import net.neoforged.fml.loading.LoadingModList;
 import org.objectweb.asm.ClassReader;

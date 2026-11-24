@@ -1,7 +1,7 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
 import io.github.betapetey.eventtrail.EventTrailIds;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;

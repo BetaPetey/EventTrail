@@ -1,9 +1,9 @@
 package io.github.betapetey.eventtrail.mixin;
 
 import com.refinedmods.refinedstorage.common.grid.GridBlockEntity;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.hooks.HookGuard;
-import io.github.betapetey.eventtrail.compat.hooks.HookSite;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.hooks.HookGuard;
+import io.github.betapetey.eventtrail.adapters.hooks.HookSite;
 import io.github.betapetey.eventtrail.inventory.adapters.refinedstorage.RefinedStoragePhysicalMenuAccess;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.level.block.entity.BlockEntity;

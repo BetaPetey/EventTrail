@@ -2,8 +2,8 @@ package io.github.betapetey.eventtrail.inventory.action;
 
 import io.github.betapetey.eventtrail.audit.ActionRecordBatch;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
 import io.github.betapetey.eventtrail.events.EventTrailEventHandler;
 import io.github.betapetey.eventtrail.inventory.access.TrashTargets;

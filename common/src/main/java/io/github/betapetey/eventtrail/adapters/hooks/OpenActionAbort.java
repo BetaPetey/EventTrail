@@ -1,12 +1,12 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
 import java.util.Objects;
 
 /**
- * The compat-side point through which a guarded hook skip discards the calling
+ * The adapter-side point through which a guarded hook skip discards the calling
  * thread's open exact container action (lead decision L15 G1).
  *
- * <p>{@code compat} does not depend on {@code events}, so the container tracker
+ * <p>{@code adapters} does not depend on {@code events}, so the container tracker
  * registers its abort here from its own static initialiser. Until it does,
  * nothing is registered and a skip has nothing to discard: an exact action can
  * only be opened by the tracker, so none exists on any thread before the

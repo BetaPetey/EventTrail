@@ -1,7 +1,7 @@
 package io.github.betapetey.eventtrail.inventory.adapters.sophisticated;
 
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import net.minecraft.server.level.ServerLevel;
 import net.p3pp3rf1y.sophisticatedcore.common.gui.StorageContainerMenuBase;
 import net.p3pp3rf1y.sophisticatedcore.inventory.InventoryHandler;

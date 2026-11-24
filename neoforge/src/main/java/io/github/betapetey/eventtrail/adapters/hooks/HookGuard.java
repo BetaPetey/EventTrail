@@ -1,13 +1,13 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 
 /**
  * The single boundary between an optional-mod hook handler and EventTrail.
  *
- * <p>Every compat hook handler hands its EventTrail work, and for wrap hooks
+ * <p>Every adapter hook handler hands its EventTrail work, and for wrap hooks
  * the mod's own call, to this class. The mod's call is held in a once-only
  * {@link Original}, so on every path the mod's code runs exactly once and its
  * result or exception comes back unchanged, whatever EventTrail's work does:</p>

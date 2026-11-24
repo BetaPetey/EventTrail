@@ -1,6 +1,6 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 
 import java.util.Collections;

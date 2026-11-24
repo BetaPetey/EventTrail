@@ -1,4 +1,4 @@
-package io.github.betapetey.eventtrail.compat;
+package io.github.betapetey.eventtrail.adapters;
 
 import io.github.betapetey.eventtrail.EventTrailIds;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility;

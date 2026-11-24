@@ -1,6 +1,6 @@
 package io.github.betapetey.eventtrail.events.parts;
 
-import io.github.betapetey.eventtrail.compat.MissingAdapterMemberException;
+import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;

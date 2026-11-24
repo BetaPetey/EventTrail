@@ -4,7 +4,7 @@ import io.github.betapetey.eventtrail.audit.ActionRecordBatch;
 import io.github.betapetey.eventtrail.audit.AuditAction;
 import io.github.betapetey.eventtrail.audit.AuditLocation;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
 import io.github.betapetey.eventtrail.events.evidence.ActorProvenance;
 import io.github.betapetey.eventtrail.events.evidence.BlockAuditPreimage;

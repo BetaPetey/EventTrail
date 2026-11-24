@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.mixin.create;
 
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.hooks.HookGuard;
-import io.github.betapetey.eventtrail.compat.hooks.HookSite;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.hooks.HookGuard;
+import io.github.betapetey.eventtrail.adapters.hooks.HookSite;
 import io.github.betapetey.eventtrail.inventory.adapters.create.CreateMountedBinding;
 import io.github.betapetey.eventtrail.inventory.adapters.create.CreateOpeningScope;
 import io.github.betapetey.eventtrail.inventory.adapters.create.CreateStorageCarrier;

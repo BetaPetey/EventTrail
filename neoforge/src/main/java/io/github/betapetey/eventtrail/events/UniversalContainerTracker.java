@@ -5,12 +5,12 @@ import io.github.betapetey.eventtrail.EventTrailIds;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
 import io.github.betapetey.eventtrail.audit.ActionRecordBatch;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterFamilyMisses;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.ItemsNotTrackedOpens;
-import io.github.betapetey.eventtrail.compat.RecordingGaps;
-import io.github.betapetey.eventtrail.compat.hooks.OpenActionAbort;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterFamilyMisses;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.ItemsNotTrackedOpens;
+import io.github.betapetey.eventtrail.adapters.RecordingGaps;
+import io.github.betapetey.eventtrail.adapters.hooks.OpenActionAbort;
 import io.github.betapetey.eventtrail.inventory.adapters.StandardPhysicalMenuAdapter;
 import io.github.betapetey.eventtrail.inventory.adapters.VanillaEnderChestMenuAdapter;
 import io.github.betapetey.eventtrail.inventory.action.AuthoritativeTransactionCollector;
@@ -3216,7 +3216,7 @@ public final class UniversalContainerTracker {
                     ? Optional.empty() : Optional.of(label.orElseThrow());
         } catch (Throwable failure) {
             // Fully qualified, with its site inline, to keep this lane's tracker hunks to the label sites.
-            io.github.betapetey.eventtrail.compat.ContainerLabelFallbacks.fellBack("container tracker",
+            io.github.betapetey.eventtrail.adapters.ContainerLabelFallbacks.fellBack("container tracker",
                     "menu open label", failure);
             return Optional.empty();
         }

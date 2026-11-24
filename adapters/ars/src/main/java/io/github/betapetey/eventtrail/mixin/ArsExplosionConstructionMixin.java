@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.mixin;
 
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.hooks.HookGuard;
-import io.github.betapetey.eventtrail.compat.hooks.HookSite;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.hooks.HookGuard;
+import io.github.betapetey.eventtrail.adapters.hooks.HookSite;
 import io.github.betapetey.eventtrail.events.spells.ArsNegativeExplosionScope;
 import net.minecraft.core.Holder;
 import net.minecraft.core.particles.ParticleOptions;

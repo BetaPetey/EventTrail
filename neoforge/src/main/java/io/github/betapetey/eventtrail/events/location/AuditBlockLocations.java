@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.events.location;
 
 import io.github.betapetey.eventtrail.audit.AuditLocation;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
 import io.github.betapetey.eventtrail.util.RateLimitedDiagnosticGate;
 import org.apache.logging.log4j.LogManager;

@@ -1,6 +1,6 @@
 package io.github.betapetey.eventtrail.inventory.adapters.integrated;
 
-import io.github.betapetey.eventtrail.compat.hooks.HookVerdicts;
+import io.github.betapetey.eventtrail.adapters.hooks.HookVerdicts;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTarget;
 import io.github.betapetey.eventtrail.inventory.spi.*;
 import org.cyclops.integratedterminals.inventory.container.ContainerTerminalStorageBase;

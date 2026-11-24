@@ -2,9 +2,9 @@ package io.github.betapetey.eventtrail.mixin.enderstorage;
 
 import codechicken.enderstorage.container.ContainerEnderItemStorage;
 import codechicken.enderstorage.storage.EnderItemStorage;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.hooks.HookGuard;
-import io.github.betapetey.eventtrail.compat.hooks.HookSite;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.hooks.HookGuard;
+import io.github.betapetey.eventtrail.adapters.hooks.HookSite;
 import io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderMenuCarrier;
 import io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderOpeningScope;
 import io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderStorageBinding;

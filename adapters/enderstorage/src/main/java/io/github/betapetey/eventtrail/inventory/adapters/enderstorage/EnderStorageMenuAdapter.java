@@ -2,8 +2,8 @@ package io.github.betapetey.eventtrail.inventory.adapters.enderstorage;
 
 import codechicken.enderstorage.container.ContainerEnderItemStorage;
 import codechicken.enderstorage.storage.EnderItemStorage;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.RecordingGaps;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.RecordingGaps;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTarget;
 import io.github.betapetey.eventtrail.inventory.core.InventorySlotRole;
 import io.github.betapetey.eventtrail.inventory.spi.*;

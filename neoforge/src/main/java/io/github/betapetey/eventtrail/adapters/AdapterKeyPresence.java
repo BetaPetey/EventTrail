@@ -1,4 +1,4 @@
-package io.github.betapetey.eventtrail.compat;
+package io.github.betapetey.eventtrail.adapters;
 
 import net.neoforged.fml.loading.LoadingModList;
 

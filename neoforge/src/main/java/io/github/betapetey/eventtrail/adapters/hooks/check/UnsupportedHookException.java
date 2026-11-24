@@ -1,4 +1,4 @@
-package io.github.betapetey.eventtrail.compat.hooks.check;
+package io.github.betapetey.eventtrail.adapters.hooks.check;
 
 /**
  * A hook class uses a Mixin or MixinExtras feature that {@link HookReader} does not model, or is not a well-formed

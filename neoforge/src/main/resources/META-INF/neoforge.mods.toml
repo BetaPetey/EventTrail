@@ -19,7 +19,7 @@ ${mod_third_party_notice}
 config="eventtrail.mixins.json"
 
 [[mixins]]
-config="eventtrail-compat.mixins.json"
+config="eventtrail-adapters.mixins.json"
 
 [[dependencies.${mod_id}]]
 modId="neoforge"

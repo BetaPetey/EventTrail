@@ -1,6 +1,6 @@
 package io.github.betapetey.eventtrail.mixin;
 
-import io.github.betapetey.eventtrail.compat.hooks.HookAdmission;
+import io.github.betapetey.eventtrail.adapters.hooks.HookAdmission;
 
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.logging.ILogger;
@@ -30,8 +30,8 @@ import java.util.function.Supplier;
  * has been decided.</p>
  *
  * <p>Both hook lists name this plugin (work map R4-nonfatal): the required {@code eventtrail.mixins.json} holds the
- * vanilla and engine-credit hooks, the non-required {@code eventtrail-compat.mixins.json} every optional-mod hook.
- * Mixin makes one instance per list; only the compat list's instance makes an admission.</p>
+ * vanilla and engine-credit hooks, the non-required {@code eventtrail-adapters.mixins.json} every optional-mod hook.
+ * Mixin makes one instance per list; only the adapters list's instance makes an admission.</p>
  *
  * <p>Links only to the JDK, ASM, Mixin, FML and EventTrail classes that do the same (the plugin-loads test pins
  * this): if this class failed to load, a non-required list would hand every hook to Mixin unchecked.</p>

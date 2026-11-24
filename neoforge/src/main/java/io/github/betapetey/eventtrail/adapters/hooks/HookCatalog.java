@@ -1,6 +1,6 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -10,28 +10,28 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
-import static io.github.betapetey.eventtrail.compat.AdapterKey.AE2;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.ARS_CAST;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.ARS_ITEM;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.BUILDING_GADGETS;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.CREATE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.ENDER_STORAGE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.FUNCTIONAL_STORAGE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.INTEGRATED_TERMINALS;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.IRONS;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.MINING_GADGETS;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.OCCULTISM;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.PARTS_ADVANCED_AE_INPLACE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.PARTS_AE2_INPLACE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.PARTS_APPLIED_PNEUMATICS_INPLACE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.POCKET_STORAGE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.REFINED_STORAGE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.RFTOOLS_STORAGE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.SABLE_FRAME;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.SOPHISTICATED_BACKPACKS;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.SOPHISTICATED_LINKED_GROUPS;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.SOPHISTICATED_STORAGE_CREATE;
-import static io.github.betapetey.eventtrail.compat.AdapterKey.STORAGE_IN_MOTION;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.AE2;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.ARS_CAST;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.ARS_ITEM;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.BUILDING_GADGETS;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.CREATE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.ENDER_STORAGE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.FUNCTIONAL_STORAGE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.INTEGRATED_TERMINALS;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.IRONS;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.MINING_GADGETS;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.OCCULTISM;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.PARTS_ADVANCED_AE_INPLACE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.PARTS_AE2_INPLACE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.PARTS_APPLIED_PNEUMATICS_INPLACE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.POCKET_STORAGE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.REFINED_STORAGE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.RFTOOLS_STORAGE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.SABLE_FRAME;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.SOPHISTICATED_BACKPACKS;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.SOPHISTICATED_LINKED_GROUPS;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.SOPHISTICATED_STORAGE_CREATE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.STORAGE_IN_MOTION;
 
 /**
  * The hook-to-key table: which adapter keys own each of the 120 optional-mod hook classes (work map R4-wire; the

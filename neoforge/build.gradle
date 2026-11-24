@@ -663,11 +663,11 @@ tasks.named('compileJava') {
 
 // Restructure M2 (item 21h): every adapters/<folder>/src/main/java joins the root's main source set, in one sorted glob
 // (a '+' in a folder name is kept verbatim), so the root still compiles every source in its one javac run.
-def eventtrailCompatRoots = (rootProject.file('adapters').listFiles() ?: new File[0])
+def eventtrailAdapterRoots = (rootProject.file('adapters').listFiles() ?: new File[0])
         .findAll { new File(it, 'src/main/java').directory }
         .sort { it.name }
         .collect { new File(it, 'src/main/java') }
-eventtrailCompatRoots.each { sourceSets.main.java.srcDir(it) }
+eventtrailAdapterRoots.each { sourceSets.main.java.srcDir(it) }
 
 // :common compiles against exactly these of the root's own resolved compile libraries (byte-identity condition C3).
 def eventtrailCommonLibraries = ['org.ow2.asm:asm', 'org.ow2.asm:asm-tree', 'org.apache.logging.log4j:log4j-api',
@@ -748,7 +748,7 @@ if (!publicBoundaryOnly && internalTestingScript.isFile()) {
             includeTestsMatching 'io.github.betapetey.eventtrail.inventory.adapters.integrated.*'
             includeTestsMatching 'io.github.betapetey.eventtrail.inventory.optional.OptionalMenuAdapterLoaderTest'
             includeTestsMatching 'io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibilityTest'
-            includeTestsMatching 'io.github.betapetey.eventtrail.compat.hooks.HookRealJarPassTest'
+            includeTestsMatching 'io.github.betapetey.eventtrail.adapters.hooks.HookRealJarPassTest'
         }
         workingDir = rootProject.layout.buildDirectory.dir('test-integrated-atm10-work').get().asFile
         doFirst {

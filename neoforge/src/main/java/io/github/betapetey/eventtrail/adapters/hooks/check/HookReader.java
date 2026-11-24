@@ -1,18 +1,18 @@
-package io.github.betapetey.eventtrail.compat.hooks.check;
+package io.github.betapetey.eventtrail.adapters.hooks.check;
 
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.AccessorMethod;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.Counts;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.Injector;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.InjectorKind;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.Kind;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.LocalCapture;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.Point;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.PointKind;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.Reference;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.ReferenceKind;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.Selector;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.ShadowField;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel.ShadowMethod;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.AccessorMethod;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.Counts;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.Injector;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.InjectorKind;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.Kind;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.LocalCapture;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.Point;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.PointKind;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.Reference;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.ReferenceKind;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.Selector;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.ShadowField;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel.ShadowMethod;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -66,7 +66,7 @@ public final class HookReader {
     static final String WRAP_OPERATION = "Lcom/llamalad7/mixinextras/injector/wrapoperation/WrapOperation;";
     static final String WRAP_METHOD = "Lcom/llamalad7/mixinextras/injector/wrapmethod/WrapMethod;";
     static final String LOCAL = "Lcom/llamalad7/mixinextras/sugar/Local;";
-    static final String HOOK_SITE = "Lio/github/betapetey/eventtrail/compat/hooks/HookSite;";
+    static final String HOOK_SITE = "Lio/github/betapetey/eventtrail/adapters/hooks/HookSite;";
     static final String OPERATION = "Lcom/llamalad7/mixinextras/injector/wrapoperation/Operation;";
     static final String CALLBACK_INFO = "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;";
     static final String CALLBACK_INFO_RETURNABLE =
@@ -74,7 +74,7 @@ public final class HookReader {
 
     /** Annotation namespaces whose every annotation must be modelled here. */
     private static final List<String> MODELLED_NAMESPACES = List.of(
-            "Lorg/spongepowered/", "Lcom/llamalad7/mixinextras/", "Lio/github/betapetey/eventtrail/compat/hooks/");
+            "Lorg/spongepowered/", "Lcom/llamalad7/mixinextras/", "Lio/github/betapetey/eventtrail/adapters/hooks/");
 
     /**
      * Internal-name prefixes of the fixed platform: the JDK, Minecraft, NeoForge, Mixin, MixinExtras, ASM, the

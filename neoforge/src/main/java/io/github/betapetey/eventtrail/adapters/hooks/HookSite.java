@@ -1,4 +1,4 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;

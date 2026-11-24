@@ -1,6 +1,6 @@
 package io.github.betapetey.eventtrail.permissions;
 
-import io.github.betapetey.eventtrail.compat.FailureClassifier;
+import io.github.betapetey.eventtrail.adapters.FailureClassifier;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 import net.minecraft.server.level.ServerPlayer;
 

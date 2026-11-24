@@ -398,7 +398,7 @@ def verifyReleasePackage = tasks.register('verifyEventTrailReleasePackage') {
                     'LICENSE',
                     'THIRD-PARTY-NOTICES',
                     'eventtrail.mixins.json',
-                    'eventtrail-compat.mixins.json'
+                    'eventtrail-adapters.mixins.json'
             ] as Set
             exactOuterResources.addAll(expectedNestedArtifacts.keySet())
             exactOuterResources.addAll(expectedPackagedResources.keySet())

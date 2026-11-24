@@ -21,11 +21,11 @@ import io.github.betapetey.eventtrail.commands.presentation.ExplosionVerdicts;
 import io.github.betapetey.eventtrail.commands.presentation.LookupResultsView;
 import io.github.betapetey.eventtrail.commands.presentation.LookupSummaryView;
 import io.github.betapetey.eventtrail.commands.presentation.RelativeAgeFormatter;
-import io.github.betapetey.eventtrail.compat.AdapterFamilyMisses;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.ContainerLabelFallbacks;
-import io.github.betapetey.eventtrail.compat.ItemsNotTrackedOpens;
-import io.github.betapetey.eventtrail.compat.RecordingGaps;
+import io.github.betapetey.eventtrail.adapters.AdapterFamilyMisses;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.ContainerLabelFallbacks;
+import io.github.betapetey.eventtrail.adapters.ItemsNotTrackedOpens;
+import io.github.betapetey.eventtrail.adapters.RecordingGaps;
 import io.github.betapetey.eventtrail.events.ItemClickOverrideProof;
 import io.github.betapetey.eventtrail.events.gadgets.GadgetAuditRuntime;
 import io.github.betapetey.eventtrail.events.location.AuditBlockLocations;
@@ -743,7 +743,7 @@ public final class ExtendedLookup {
             boolean configured,
             ContainerAccessMetrics metrics) {
         return containerAccessStatusLines(configured, metrics,
-                io.github.betapetey.eventtrail.compat.AdapterFailSafe.accessRefusals());
+                io.github.betapetey.eventtrail.adapters.AdapterFailSafe.accessRefusals());
     }
 
     /**

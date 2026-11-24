@@ -6,7 +6,7 @@ import com.enderio.enderio.api.conduits.ConduitApi;
 import com.enderio.enderio.api.conduits.ConduitType;
 import com.enderio.enderio.api.conduits.bundle.ConduitBundle;
 import com.enderio.enderio.foundation.block.entity.Wrenchable;
-import io.github.betapetey.eventtrail.compat.MissingAdapterMemberException;
+import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;

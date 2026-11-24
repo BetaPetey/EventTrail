@@ -1,6 +1,6 @@
-package io.github.betapetey.eventtrail.compat;
+package io.github.betapetey.eventtrail.adapters;
 
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe.FailureKind;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe.FailureKind;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 
 import java.lang.reflect.InvocationTargetException;

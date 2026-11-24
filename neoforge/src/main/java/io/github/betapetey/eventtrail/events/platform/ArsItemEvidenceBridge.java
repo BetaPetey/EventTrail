@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.events.platform;
 
 import io.github.betapetey.eventtrail.EventTrailConfig;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
 import io.github.betapetey.eventtrail.events.UniversalContainerTracker;
 import io.github.betapetey.eventtrail.events.evidence.ActorProvenance;

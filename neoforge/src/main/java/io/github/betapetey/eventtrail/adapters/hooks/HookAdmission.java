@@ -1,16 +1,16 @@
-package io.github.betapetey.eventtrail.compat.hooks;
+package io.github.betapetey.eventtrail.adapters.hooks;
 
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.AdapterKeyPresence;
-import io.github.betapetey.eventtrail.compat.hooks.HookCatalog.Entry;
-import io.github.betapetey.eventtrail.compat.hooks.HookCatalog.Group;
-import io.github.betapetey.eventtrail.compat.hooks.check.ClassSource;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookCheckResult;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookModel;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookReader;
-import io.github.betapetey.eventtrail.compat.hooks.check.HookTargetChecker;
-import io.github.betapetey.eventtrail.compat.hooks.check.ModFileClassSource;
-import io.github.betapetey.eventtrail.compat.hooks.check.UnsupportedHookException;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKeyPresence;
+import io.github.betapetey.eventtrail.adapters.hooks.HookCatalog.Entry;
+import io.github.betapetey.eventtrail.adapters.hooks.HookCatalog.Group;
+import io.github.betapetey.eventtrail.adapters.hooks.check.ClassSource;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookCheckResult;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookModel;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookReader;
+import io.github.betapetey.eventtrail.adapters.hooks.check.HookTargetChecker;
+import io.github.betapetey.eventtrail.adapters.hooks.check.ModFileClassSource;
+import io.github.betapetey.eventtrail.adapters.hooks.check.UnsupportedHookException;
 import net.neoforged.fml.loading.LoadingModList;
 
 import java.io.InputStream;
@@ -72,11 +72,11 @@ import java.util.function.Supplier;
  */
 public final class HookAdmission {
     /**
-     * The hook list's {@code injectors.defaultRequire} for the compat hooks: 0, the value of the non-required
-     * {@code eventtrail-compat.mixins.json} that holds them (work map R4-nonfatal; pinned to that file by
-     * {@code EventTrailMixinPluginTest} and to {@code COMPAT_LIST_MOVED} by {@code HookCatalogTest}).
+     * The hook list's {@code injectors.defaultRequire} for the adapter hooks: 0, the value of the non-required
+     * {@code eventtrail-adapters.mixins.json} that holds them (work map R4-nonfatal; pinned to that file by
+     * {@code EventTrailMixinPluginTest} and to {@code ADAPTERS_LIST_MOVED} by {@code HookCatalogTest}).
      */
-    public static final int COMPAT_DEFAULT_REQUIRE = 0;
+    public static final int ADAPTERS_DEFAULT_REQUIRE = 0;
     /** The internal-name prefix of the mixin package. */
     public static final String HOOK_PACKAGE_PATH = "io/github/betapetey/eventtrail/mixin/";
     static final String OWN_MOD_ID = "eventtrail";
@@ -183,7 +183,7 @@ public final class HookAdmission {
     }
 
     /**
-     * The production wiring of both sides (h review-02 MINOR-3): the hook list's {@link #COMPAT_DEFAULT_REQUIRE}, and
+     * The production wiring of both sides (h review-02 MINOR-3): the hook list's {@link #ADAPTERS_DEFAULT_REQUIRE}, and
      * the sink into {@link HookVerdicts}. Only the table, the game and the class source come from the caller, so a
      * test runs the same sinks the hook loader and the server start use.
      *
@@ -221,7 +221,7 @@ public final class HookAdmission {
                     HookVerdicts.recordIntegratedVariant(variant);
                 }
             };
-            return new HookAdmission(table, inputs, sources, loader, COMPAT_DEFAULT_REQUIRE);
+            return new HookAdmission(table, inputs, sources, loader, ADAPTERS_DEFAULT_REQUIRE);
         }
         Sink serverStart = new Sink() {
             @Override
@@ -257,7 +257,7 @@ public final class HookAdmission {
                 }
             }
         };
-        return new HookAdmission(table, inputs, sources, serverStart, COMPAT_DEFAULT_REQUIRE);
+        return new HookAdmission(table, inputs, sources, serverStart, ADAPTERS_DEFAULT_REQUIRE);
     }
 
     /** Whether the class tracker says a target class (dotted name) is loaded. */

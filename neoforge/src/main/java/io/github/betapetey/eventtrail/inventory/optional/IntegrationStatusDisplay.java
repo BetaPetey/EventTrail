@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.inventory.optional;
 
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.hooks.HookVerdicts;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.hooks.HookVerdicts;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.ContractState;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.IntegrationState;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.Snapshot;

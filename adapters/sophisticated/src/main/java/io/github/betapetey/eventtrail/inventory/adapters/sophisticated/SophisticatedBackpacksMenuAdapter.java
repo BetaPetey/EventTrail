@@ -1,7 +1,7 @@
 package io.github.betapetey.eventtrail.inventory.adapters.sophisticated;
 
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.inventory.core.AccessKind;
 import io.github.betapetey.eventtrail.inventory.core.BackingContextKind;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTarget;

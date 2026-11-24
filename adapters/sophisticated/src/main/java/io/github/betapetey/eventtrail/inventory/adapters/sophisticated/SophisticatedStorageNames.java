@@ -1,6 +1,6 @@
 package io.github.betapetey.eventtrail.inventory.adapters.sophisticated;
 
-import io.github.betapetey.eventtrail.compat.ContainerLabelFallbacks;
+import io.github.betapetey.eventtrail.adapters.ContainerLabelFallbacks;
 import io.github.betapetey.eventtrail.util.DisplayNameResolver;
 import io.github.betapetey.eventtrail.util.DisplayNameResolver.RenameState;
 import net.minecraft.world.item.ItemStack;

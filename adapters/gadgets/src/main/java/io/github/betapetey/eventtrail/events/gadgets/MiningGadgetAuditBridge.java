@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.events.gadgets;
 
 import com.direwolf20.mininggadgets.common.tiles.RenderBlockTileEntity;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;

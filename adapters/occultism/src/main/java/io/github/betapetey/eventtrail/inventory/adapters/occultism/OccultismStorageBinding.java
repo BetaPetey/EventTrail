@@ -8,8 +8,8 @@ import com.klikli_dev.occultism.common.misc.StorageControllerMapItemStackHandler
 import com.klikli_dev.occultism.common.misc.StorageControllerSlot;
 import com.klikli_dev.occultism.registry.OccultismContainers;
 import com.klikli_dev.occultism.registry.OccultismDataComponents;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.events.UniversalContainerTracker;
 import io.github.betapetey.eventtrail.events.location.AuditBlockLocations;
 import io.github.betapetey.eventtrail.inventory.core.*;

@@ -7,7 +7,7 @@ import appeng.api.parts.IPartHost;
 import appeng.api.parts.IPartItem;
 import appeng.blockentity.AEBaseBlockEntity;
 import appeng.util.SettingsFrom;
-import io.github.betapetey.eventtrail.compat.MissingAdapterMemberException;
+import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponentMap;
 import net.minecraft.core.component.DataComponents;

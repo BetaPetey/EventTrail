@@ -1,9 +1,9 @@
 package io.github.betapetey.eventtrail.inventory.adapters.integrated;
 
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.MissingAdapterMemberException;
-import io.github.betapetey.eventtrail.compat.hooks.HookVerdicts;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
+import io.github.betapetey.eventtrail.adapters.hooks.HookVerdicts;
 import org.cyclops.commoncapabilities.api.ingredient.storage.IIngredientComponentStorage;
 import org.cyclops.integrateddynamics.core.network.IngredientChannelIndexed;
 

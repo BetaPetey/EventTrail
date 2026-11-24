@@ -1,7 +1,7 @@
 package io.github.betapetey.eventtrail.inventory.optional;
 
 import io.github.betapetey.eventtrail.EventTrailIds;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;

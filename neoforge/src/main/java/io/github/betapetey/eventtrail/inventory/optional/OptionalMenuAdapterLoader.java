@@ -1,10 +1,10 @@
 package io.github.betapetey.eventtrail.inventory.optional;
 
 import io.github.betapetey.eventtrail.EventTrailIds;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
-import io.github.betapetey.eventtrail.compat.AdapterKeyPresence;
-import io.github.betapetey.eventtrail.compat.FailureClassifier;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterKeyPresence;
+import io.github.betapetey.eventtrail.adapters.FailureClassifier;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.ContractState;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.IntegrationState;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility.RuntimeDisposition;

@@ -1,8 +1,8 @@
 package io.github.betapetey.eventtrail.inventory.adapters.ae2;
 
 import appeng.menu.me.common.MEStorageMenu;
-import io.github.betapetey.eventtrail.compat.AdapterFailSafe;
-import io.github.betapetey.eventtrail.compat.AdapterKey;
+import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
+import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTarget;
 import io.github.betapetey.eventtrail.inventory.spi.AdapterMatch;
 import io.github.betapetey.eventtrail.inventory.spi.MenuAdapterContext;
