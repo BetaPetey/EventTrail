@@ -31,7 +31,9 @@
     "ServerPlayerBeingHurtMixin",
     "ServerPlayerDeathMixin",
     "ServerPlayerGameModeMixin",
-    "TntBlockActionEvidenceMixin"
+    "TntBlockActionEvidenceMixin",
+    "graves.ContainersDropItemStackSpillMixin",
+    "graves.GiveItemToPlayerSpillMixin"
   ],
   "injectors": {
     "defaultRequire": 1

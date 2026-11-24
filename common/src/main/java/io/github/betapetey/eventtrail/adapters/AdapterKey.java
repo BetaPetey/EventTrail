@@ -12,10 +12,11 @@ import java.util.Optional;
  * sixteen menu keys belongs to exactly one specification of
  * {@code OptionalMenuAdapterLoader}, which names its key explicitly (GF-ADAPTERSPECS:
  * a mod may have several specifications, each with its own appended menu key;
- * today each mod has one); the other fifteen keys cover the
- * optional-mod bridges (the three part-removal readers and the three AE2
- * in-place hook keys included), the Sophisticated linked-group guard and the
- * Sable location provider, which have no menu specification.</p>
+ * today each mod has one); the other twenty-two keys cover the
+ * optional-mod bridges (the three part-removal readers, the three AE2
+ * in-place hook keys and the seven grave-mod keys included), the
+ * Sophisticated linked-group guard and the Sable location provider, which have
+ * no menu specification.</p>
  *
  * <p>The constants and their mod ids are frozen at B0: the hook-to-family
  * table, the loader snapshot and the status lines all refer to them. Build B
@@ -70,7 +71,20 @@ public enum AdapterKey {
      */
     PARTS_AE2_INPLACE(Kind.BRIDGE, "ae2", "Applied Energistics 2 in-place moves"),
     PARTS_ADVANCED_AE_INPLACE(Kind.BRIDGE, "advanced_ae", "Advanced AE in-place moves"),
-    PARTS_APPLIED_PNEUMATICS_INPLACE(Kind.BRIDGE, "appliedpneumatics", "Applied Pneumatics in-place moves");
+    PARTS_APPLIED_PNEUMATICS_INPLACE(Kind.BRIDGE, "appliedpneumatics", "Applied Pneumatics in-place moves"),
+    /**
+     * Graves: one bridge key per grave mod, appended so no earlier ordinal moves. The mod id and the display name are
+     * the mod's own (its mods.toml, the name the game's mod list shows); the display name is also the parenthesised
+     * mod name of a grave row, so each grave mod id has exactly one bridge key. MineColonies' colony grave rows show
+     * no parenthesis.
+     */
+    GRAVESTONE(Kind.BRIDGE, "gravestone", "Gravestone Mod"),
+    TOMBSTONE(Kind.BRIDGE, "tombstone", "Corail Tombstone"),
+    SIMPLE_TOMB(Kind.BRIDGE, "simpletomb", "Simple Tombstone"),
+    CORPSE(Kind.BRIDGE, "corpse", "Corpse"),
+    YIGD(Kind.BRIDGE, "yigd", "You're in Grave Danger"),
+    EPITAPHS(Kind.BRIDGE, "epitaphs", "Epitaphs"),
+    MINECOLONIES(Kind.BRIDGE, "minecolonies", "MineColonies");
 
     /** What kind of EventTrail code the key switches. */
     public enum Kind {

@@ -206,8 +206,13 @@ final class PlayerActionScopeFrame {
 
     // ----- touches --------------------------------------------------------------------------------------------------
 
-    /** True when a first touch of this position may be kept now (not masked, not seen, room left). */
+    /**
+     * True when a first touch of this position may be kept now (not masked, not seen, room left; for a GRAVE_SNEAK
+     * frame, only the grave's own level and position).
+     */
     boolean wantsTouch(Key key) {
+        // Graves design r6, 4.1 (CK MINOR-2): a sneak take's frame keeps a first touch only at its own grave.
+        if (kind == PlayerActionScopeRules.Kind.GRAVE_SNEAK && !isClicked(key)) return false;
         if (suspended > 0 || foreign > 0 || boneMeal || touches.containsKey(key)) return false;
         if (touches.size() >= MAX_TOUCHES) {
             touchesNotChecked++;

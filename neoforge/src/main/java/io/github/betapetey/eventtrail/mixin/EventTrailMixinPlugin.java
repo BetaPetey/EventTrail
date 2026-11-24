@@ -65,7 +65,9 @@ public final class EventTrailMixinPlugin implements IMixinConfigPlugin {
             "ServerPlayerBeingHurtMixin",
             "ServerPlayerDeathMixin",
             "ServerPlayerGameModeMixin",
-            "TntBlockActionEvidenceMixin");
+            "TntBlockActionEvidenceMixin",
+            "graves.ContainersDropItemStackSpillMixin",
+            "graves.GiveItemToPlayerSpillMixin");
 
     /** Hooks on vanilla classes that deny a mod's stale last-hit credit: they need only that mod installed. */
     static final Map<String, String> ENGINE_CREDIT_HOOKS = Map.of(

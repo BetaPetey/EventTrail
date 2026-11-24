@@ -6,6 +6,7 @@ import io.github.betapetey.eventtrail.audit.AuditEvidence;
 import io.github.betapetey.eventtrail.audit.AuditLocation;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
 import io.github.betapetey.eventtrail.audit.AuditSubject;
+import io.github.betapetey.eventtrail.audit.ShownCause;
 import io.github.betapetey.eventtrail.util.EventTrailNbtUtil;
 import net.minecraft.world.item.ItemStack;
 
@@ -37,6 +38,18 @@ public final class InventoryTransactionNormalizer {
     public static List<AuditRecord> toAuditRecords(
             InventoryTransactionEvidence evidence,
             boolean captureFullMetadata) {
+        return toAuditRecords(evidence, captureFullMetadata, null);
+    }
+
+    /**
+     * As {@link #toAuditRecords(InventoryTransactionEvidence, boolean)}, with one shown cause on every chunk's payload
+     * (graves design r6, 1.4). A null cause gives the same records as the two-argument form. The evidence version stays
+     * {@link ContainerTransferPayloadCodec#CURRENT_VERSION} for both payload bodies.
+     */
+    public static List<AuditRecord> toAuditRecords(
+            InventoryTransactionEvidence evidence,
+            boolean captureFullMetadata,
+            ShownCause cause) {
         if (!evidence.target().hasAccessPosition()) {
             throw new IllegalArgumentException("Current EventTrail rows require an access position");
         }
@@ -49,7 +62,8 @@ public final class InventoryTransactionNormalizer {
                     chunk,
                     chunk.syntheticActor(),
                     chunk.providerId(),
-                    serialized);
+                    serialized,
+                    cause);
             records.add(AuditRecord.captureAt(
                     chunk.occurredAtEpochMillis(),
                     actionFor(chunk.direction()),

@@ -5,6 +5,7 @@ import io.github.betapetey.eventtrail.audit.AuditAttribution;
 import io.github.betapetey.eventtrail.audit.AuditEvidence;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
 import io.github.betapetey.eventtrail.audit.AuditSubject;
+import io.github.betapetey.eventtrail.audit.ShownCause;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTransferPayload;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTransferPayloadCodec;
 import io.github.betapetey.eventtrail.inventory.core.TransactionDirection;
@@ -12,8 +13,12 @@ import io.github.betapetey.eventtrail.util.AuditSnbtParser;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,8 +37,9 @@ import java.util.Set;
  * <p>A burst is a maximal stretch of adjacent combinable rows sharing the
  * action, the indexed party (storage id, canonical indexed name, identity
  * kind), the world, the cause (kind, causality, detail) and, for transfers,
- * the backing reference, the container position and the stored container
- * label. A burst ends before a row that has another burst key, that never
+ * the backing reference, the container position, the stored container
+ * label and the payload's shown cause with its providerId (graves design r6,
+ * 1.9; null on both sides for a row without a cause). A burst ends before a row that has another burst key, that never
  * combines, that is more than the gap limit older than the row before it, or
  * that is more than the span limit older than the burst's newest row. Inside
  * a burst, one line per subject: for blocks the registry id (the stored block
@@ -145,18 +151,19 @@ public final class LookupGrouper {
         }
         if (record.evidence() instanceof AuditEvidence.ContainerTransfer transfer) {
             if (subject.kind() != AuditSubject.Kind.CONTAINER) return null;
-            CompoundTag details = capturedDetailsWithoutCount(transfer);
-            if (details == null) return null;
+            CapturedTransfer captured = capturedTransfer(transfer);
+            if (captured == null) return null;
             return new RowKey(
                     burstKey(record,
                             subject.technicalIdentity(),
                             record.location().position(),
-                            subject.presentationIdentity()),
+                            subject.presentationIdentity(),
+                            captured.cause()),
                     new LineKey(
                             transfer.itemId().toString(),
                             null,
                             ContainerTransferPayload.MetadataState.CAPTURED.name(),
-                            details));
+                            captured.details()));
         }
         // Unavailable evidence: the payload did not decode.
         return null;
@@ -167,6 +174,15 @@ public final class LookupGrouper {
             String backingReference,
             BlockPos containerPosition,
             String containerLabel) {
+        return burstKey(record, backingReference, containerPosition, containerLabel, null);
+    }
+
+    private static BurstKey burstKey(
+            AuditRecord record,
+            String backingReference,
+            BlockPos containerPosition,
+            String containerLabel,
+            CauseKey cause) {
         AuditAttribution attribution = record.attribution();
         AuditAttribution.IndexedParty party = attribution.indexedParty();
         return new BurstKey(
@@ -180,16 +196,18 @@ public final class LookupGrouper {
                 attribution.causeDetail(),
                 backingReference,
                 containerPosition,
-                containerLabel);
+                containerLabel,
+                cause);
     }
 
     /**
      * The stored stack details of a CAPTURED transfer whose payload decodes and
-     * matches its row, with the top-level {@code count} tag removed; null for a
-     * row that shows a fidelity note (decode failure, mismatch, UNAVAILABLE).
-     * Nested {@code count} tags (container contents) stay in the key.
+     * matches its row, with the top-level {@code count} tag removed, and its
+     * shown cause's key; null for a row that shows a fidelity note (decode
+     * failure, mismatch, UNAVAILABLE). Nested {@code count} tags (container
+     * contents) stay in the key.
      */
-    private static CompoundTag capturedDetailsWithoutCount(AuditEvidence.ContainerTransfer transfer) {
+    private static CapturedTransfer capturedTransfer(AuditEvidence.ContainerTransfer transfer) {
         try {
             ContainerTransferPayloadCodec.DecodeResult decoded =
                     ContainerTransferPayloadCodec.decode(transfer.encodedPayload());
@@ -201,11 +219,35 @@ public final class LookupGrouper {
             if (!parsed.successful() || parsed.tag() == null) return null;
             CompoundTag details = parsed.tag().copy();
             details.remove(STACK_COUNT_TAG);
-            return details;
-        } catch (RuntimeException | LinkageError | StackOverflowError ignored) {
+            return new CapturedTransfer(details, causeKey(payload));
+        } catch (RuntimeException | LinkageError | StackOverflowError | IOException ignored) {
             // Fail closed: a row whose stored details cannot be read never combines.
             return null;
         }
+    }
+
+    /**
+     * Graves design r6, 1.9: the decoded shown cause, compared by its canonical cause-block bytes, so a grave row never
+     * combines with an un-caused row or with a row of another owner. A row with a cause also keys on its providerId, so
+     * rows whose wording differs by provider (a Simple Tomb {@code .pulled} portion beside a take) stay apart. Null for a
+     * row without a cause and for a row that is not a grave row ({@link GraveWording#isGraveProvider}): r6 1.9 adds the
+     * cause to the key for grave rows only ("Rows that combine today still combine"), so a caused row of another
+     * provider (a GF-ONPLAYER row) combines exactly as before.
+     */
+    private static CauseKey causeKey(ContainerTransferPayload payload) throws IOException {
+        if (payload.shownCause() == null || !GraveWording.isGraveProvider(payload.providerId())) return null;
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            ShownCause.writeBlock(output, payload.shownCause());
+        }
+        return new CauseKey(payload.providerId(), HexFormat.of().formatHex(bytes.toByteArray()));
+    }
+
+    private record CapturedTransfer(CompoundTag details, CauseKey cause) {
+    }
+
+    /** A shown cause's canonical block bytes (as hex) and its row's providerId. */
+    private record CauseKey(String providerId, String causeBlock) {
     }
 
     private static boolean transferMatches(
@@ -296,7 +338,8 @@ public final class LookupGrouper {
             String causeDetail,
             String backingReference,
             BlockPos containerPosition,
-            String containerLabel) {
+            String containerLabel,
+            CauseKey cause) {
     }
 
     /** Blocks: registry id and logged name. Transfers: item id, metadata state and count-free stack details. */

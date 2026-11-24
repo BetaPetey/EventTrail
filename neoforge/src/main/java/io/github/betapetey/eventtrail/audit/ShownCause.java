@@ -237,6 +237,23 @@ public record ShownCause(
     }
 
     /**
+     * "via &lt;grave&gt;" (graves design r6, 1.4): a grave's take rows. {@code display} is the grave's display as the
+     * caller resolved it on the server thread (real name, custom name alongside); it is stored as safe text, and a null or
+     * blank display stores the marked "Unresolved &lt;subject&gt; (&lt;id&gt;)" with {@link #resolved()} false, as
+     * {@link #compose} does. A display that is that marked form is not resolved either. {@code owner} is the grave's owner
+     * as {@code GraveOwners} built it, or null when the read found none. Throws NullPointerException for a null id or
+     * subject.
+     */
+    public static ShownCause viaGrave(ResourceLocation id, String display, Subject subject, Owner owner) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(subject, "subject");
+        String unresolved = unresolvedDisplay(subject.code, id.toString());
+        String safe = safeText(display, MAX_DISPLAY_CHARS);
+        if (safe == null) return new ShownCause(Form.NAMED, Verb.VIA, subject, id, unresolved, false, owner);
+        return new ShownCause(Form.NAMED, Verb.VIA, subject, id, safe, !safe.startsWith(unresolved), owner);
+    }
+
+    /**
      * The one marked cause, {@value #UNIDENTIFIED_TEXT} (design 4.8 item 1). Only for player-action container rows
      * that meet section 4.5's three conditions; the InventoryChange codec refuses it. Returns the same constant every
      * call.

@@ -98,6 +98,20 @@ public record ContainerTransferPayload(
             boolean syntheticActor,
             String providerId,
             String capturedMetadataSnbt) {
+        return from(evidence, syntheticActor, providerId, capturedMetadataSnbt, null);
+    }
+
+    /**
+     * As {@link #from(InventoryTransactionEvidence, boolean, String, String)}, with the row's shown cause (graves
+     * design r6, 1.4). A null cause gives the same payload as the four-argument form, which the codec writes as
+     * version 1 byte for byte; a cause makes it version 2.
+     */
+    public static ContainerTransferPayload from(
+            InventoryTransactionEvidence evidence,
+            boolean syntheticActor,
+            String providerId,
+            String capturedMetadataSnbt,
+            ShownCause cause) {
         Objects.requireNonNull(evidence, "evidence");
         String reason = metadataUnavailableReason(capturedMetadataSnbt);
         ResourceLocation itemId = ResourceLocation.parse(evidence.item().registryId());
@@ -116,7 +130,8 @@ public record ContainerTransferPayload(
                 providerId,
                 evidence.target().accessKind(),
                 evidence.target().backingContextKind(),
-                opaqueReference(evidence.target().stableContextKey()));
+                opaqueReference(evidence.target().stableContextKey()),
+                cause);
     }
 
     static String opaqueReference(String stableContextKey) {

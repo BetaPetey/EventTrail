@@ -27,6 +27,7 @@ io.github.betapetey.eventtrail.events.spells.IronsEngineCreditGuard	irons	irons_
 io.github.betapetey.eventtrail.events.spells.IronsSpellAuditRuntime	irons	irons_spellbooks	support
 io.github.betapetey.eventtrail.inventory.adapters.ae2.Ae2MenuAdapter	ae2	ae2	adapter
 io.github.betapetey.eventtrail.inventory.adapters.ae2.Ae2WtlibMenuAdapter	ae2	ae2wtlib	adapter
+io.github.betapetey.eventtrail.inventory.adapters.corpse.CorpseGraveSpec	corpse	corpse	support
 io.github.betapetey.eventtrail.inventory.adapters.create.CreateEnderMountedAnchor	create+enderstorage	create,enderstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.create.CreateEntityCarrier	create	create	support
 io.github.betapetey.eventtrail.inventory.adapters.create.CreateMountedBinding	create	create	support
@@ -42,7 +43,9 @@ io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderOpeningScope
 io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderStorageBinding	enderstorage	enderstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderStorageCarrier	enderstorage	enderstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderStorageMenuAdapter	enderstorage	enderstorage	adapter
+io.github.betapetey.eventtrail.inventory.adapters.epitaphs.EpitaphsGraveSpec	epitaphs	epitaphs	support
 io.github.betapetey.eventtrail.inventory.adapters.functionalstorage.FunctionalStorageDirectActions	functionalstorage	functionalstorage	support
+io.github.betapetey.eventtrail.inventory.adapters.gravestone.GraveStoneGraveSpec	gravestone	gravestone	support
 io.github.betapetey.eventtrail.inventory.adapters.integrated.IntegratedComponentStorageAccess	integrated	integratedterminals	support
 io.github.betapetey.eventtrail.inventory.adapters.integrated.IntegratedCountingStorageAccess	integrated	integratedterminals	support
 io.github.betapetey.eventtrail.inventory.adapters.integrated.IntegratedMenuCarrier	integrated	integratedterminals	support
@@ -56,6 +59,7 @@ io.github.betapetey.eventtrail.inventory.adapters.lootr.LootrMenuAdapter	lootr	l
 io.github.betapetey.eventtrail.inventory.adapters.lootr.LootrPersonalMode	lootr	lootr	support
 io.github.betapetey.eventtrail.inventory.adapters.mekanism.MekanismMenuAdapter	mekanism	mekanism	adapter
 io.github.betapetey.eventtrail.inventory.adapters.metalbarrels.MetalBarrelsMenuAdapter	metalbarrels	metalbarrels	adapter
+io.github.betapetey.eventtrail.inventory.adapters.minecolonies.MineColoniesGraveSpec	minecolonies	minecolonies	support
 io.github.betapetey.eventtrail.inventory.adapters.occultism.OccultismStorageBinding	occultism	occultism	support
 io.github.betapetey.eventtrail.inventory.adapters.occultism.OccultismStorageLinkAccess	occultism	occultism	support
 io.github.betapetey.eventtrail.inventory.adapters.occultism.OccultismStorageMapAccess	occultism	occultism	support
@@ -79,6 +83,7 @@ io.github.betapetey.eventtrail.inventory.adapters.rftools.RftoolsScannerBinding	
 io.github.betapetey.eventtrail.inventory.adapters.rftools.RftoolsScannerCarrier	rftools	rftoolsstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.rftools.RftoolsScannerOperations	rftools	rftoolsstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.rftools.RftoolsStorageMenuAdapter	rftools	rftoolsstorage	adapter
+io.github.betapetey.eventtrail.inventory.adapters.simpletomb.SimpleTombGraveSpec	simpletomb	simpletomb	support
 io.github.betapetey.eventtrail.inventory.adapters.sophisticated.BackpackMenuActions	sophisticated	sophisticatedbackpacks,sophisticatedstoragecreateintegration,sophisticatedstorageinmotion	support
 io.github.betapetey.eventtrail.inventory.adapters.sophisticated.LinkedGroupWatch	sophisticated	sophisticatedcore	support
 io.github.betapetey.eventtrail.inventory.adapters.sophisticated.SophisticatedBackpacksMenuAdapter	sophisticated	sophisticatedbackpacks	adapter
@@ -92,6 +97,8 @@ io.github.betapetey.eventtrail.inventory.adapters.sophisticated.SophisticatedSto
 io.github.betapetey.eventtrail.inventory.adapters.sophisticated.SophisticatedStorageNames	sophisticated	sophisticatedstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.sophisticated.SophisticatedUpgradePolicy	sophisticated	sophisticatedcore	support
 io.github.betapetey.eventtrail.inventory.adapters.storagemotion.StorageInMotionMenuAdapter	storagemotion	sophisticatedstorage,sophisticatedstorageinmotion	adapter
+io.github.betapetey.eventtrail.inventory.adapters.tombstone.TombstoneGraveSpec	tombstone	tombstone	support
+io.github.betapetey.eventtrail.inventory.adapters.yigd.YigdGraveSpec	yigd	yigd	support
 io.github.betapetey.eventtrail.mixin.Ae2MEStorageMenuMixin	ae2	ae2	mixin
 io.github.betapetey.eventtrail.mixin.Ae2StorageHelperMixin	ae2	ae2	mixin
 io.github.betapetey.eventtrail.mixin.ArsAbstractCasterMixin	ars	ars_nouveau	mixin

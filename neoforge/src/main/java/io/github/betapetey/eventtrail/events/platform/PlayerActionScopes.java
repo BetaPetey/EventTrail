@@ -19,6 +19,7 @@ import io.github.betapetey.eventtrail.inventory.core.InventorySlotRole;
 import io.github.betapetey.eventtrail.inventory.core.InventoryTransactionEvidence;
 import io.github.betapetey.eventtrail.inventory.core.InventoryTransactionNormalizer;
 import io.github.betapetey.eventtrail.inventory.core.TransactionDirection;
+import io.github.betapetey.eventtrail.inventory.graves.api.GraveTakerEvidence;
 import io.github.betapetey.eventtrail.util.DisplayNameResolver;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
 import io.github.betapetey.eventtrail.util.RateLimitedDiagnosticGate;
@@ -107,6 +108,8 @@ public final class PlayerActionScopes {
     /** Bound on the stacks read from one block's storage at its first touch. */
     static final int MAX_HELD_STACKS = 256;
     static final String PROVIDER_ID = "eventtrail.scope";
+    /** Graves design r6, 4.1: the scope detail of a sneak take's rows. */
+    static final String SNEAK_DETAIL = "sneak retrieval";
 
     private static final ThreadLocal<Open> ACTIVE = new ThreadLocal<>();
     /** Open scopes on every thread: the hot paths read this first and return at once when it is zero. */
@@ -119,6 +122,11 @@ public final class PlayerActionScopes {
     private static final LongAdder LOCATION_WITHHELD = new LongAdder();
 
     private static final StackWalker WALKER = StackWalker.getInstance();
+
+    static {
+        // Graves design r6, 1.7 route B: step 0b's scope part answers from this class's open frame.
+        GraveTakerEvidence.install(PlayerActionScopes::actingAt);
+    }
 
     /** An open scope; closing it writes its rows once. Never throws. */
     public interface Scope extends AutoCloseable {
@@ -264,6 +272,24 @@ public final class PlayerActionScopes {
                     || action == ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK;
             return open(PlayerActionScopeRules.Kind.PLAYER_ACTION, player, destroy ? packet.getPos() : null,
                     InteractionHand.MAIN_HAND, null);
+        } catch (Throwable failure) {
+            report("open", failure);
+            return NOOP;
+        }
+    }
+
+    /**
+     * Graves design r6, 4.1 (Q185): a sneak take's scope at the grave, for {@link GraveSneakFrame} only (its one
+     * caller), opened when the grave mod's take method is entered while the frame is armed. Its frame keeps a first
+     * touch only at the grave's own position, it takes no inventory snapshot and is never a withdrawal candidate (the
+     * grave adapter writes the withdrawals). Inside a command it opens nothing; otherwise it is {@link #open}'s, with
+     * the same admission order and nesting.
+     */
+    static Scope openGraveSneak(ServerPlayer player, Level level, BlockPos grave) {
+        try {
+            if (CommandCreditGuard.active()) return NOOP;
+            if (player == null || level == null || grave == null || level != player.serverLevel()) return NOOP;
+            return open(PlayerActionScopeRules.Kind.GRAVE_SNEAK, player, grave, null, SNEAK_DETAIL);
         } catch (Throwable failure) {
             report("open", failure);
             return NOOP;
@@ -599,6 +625,43 @@ public final class PlayerActionScopes {
         return open == null || open.closed ? null : open;
     }
 
+    /** Whether a scope is open on this thread (graves design r6, 4.1: the sneak frame arms only when none is). */
+    static boolean scopeOpenOnThread() {
+        return active() != null;
+    }
+
+    /**
+     * Graves design r6, 1.7 route B (step 0b's scope part, installed in {@link GraveTakerEvidence}): whether this
+     * thread's open scope is the player's own and at this grave now. Read only; never throws.
+     */
+    static boolean actingAt(UUID playerId, Object level, BlockPos position) {
+        try {
+            Open open = active();
+            if (open == null) return false;
+            return actingAt(open.frame, open.playerId, playerId, level, position);
+        } catch (Throwable failure) {
+            report("evidence", failure);
+            return false;
+        }
+    }
+
+    /**
+     * The rule on the frame alone: the scope's player is the taker (a nested other player's action, a Foreign
+     * handle, never counts) and either the frame is USE_ON or GRAVE_SNEAK clicked at the grave's level and position,
+     * or his own destroyBlock of the grave's position is running now, whatever the frame's kind (a DESTROY frame, a
+     * PLAYER_ACTION frame, a side block broken inside another block's frame). A USE frame has no clicked position.
+     */
+    static boolean actingAt(PlayerActionScopeFrame frame, UUID scopePlayer, UUID taker, Object level,
+                            BlockPos position) {
+        if (frame == null || scopePlayer == null || taker == null || level == null || position == null) return false;
+        if (!taker.equals(scopePlayer) || frame.foreign()) return false;
+        PlayerActionScopeFrame.Key key = new PlayerActionScopeFrame.Key(level, position);
+        PlayerActionScopeRules.Kind kind = frame.kind;
+        if ((kind == PlayerActionScopeRules.Kind.USE_ON || kind == PlayerActionScopeRules.Kind.GRAVE_SNEAK)
+                && frame.isClicked(key)) return true;
+        return frame.destroying(key);
+    }
+
     /**
      * Lead ruling (p2gf-5 #3): positions the placement boundary captured belong to the boundary. Every position of a
      * real player's place event inside the boundary is owned, whatever {@code recording.blocks.multiPlace.enabled}
@@ -903,8 +966,17 @@ public final class PlayerActionScopes {
         if (touch.script != null) detail.append("; ").append(touch.script);
         if (rowDetail != null) detail.append("; ").append(rowDetail);
         ActorProvenance actor = ActorProvenance.forPlayerIdentity(open.playerId, open.playerName, false,
-                ActorProvenance.Causality.IMMEDIATE_SECONDARY, detail.toString()).orElseThrow();
+                causality(open.frame.kind), detail.toString()).orElseThrow();
         return ScopeBlockEvidenceNormalizer.committed(now, action, actor, location, state, metadata);
+    }
+
+    /**
+     * How a scope's rows credit its player: a sneak take's break of the grave is his own (DIRECT, graves design r6,
+     * 4.1); every other scope's block change is his immediate-secondary act.
+     */
+    static ActorProvenance.Causality causality(PlayerActionScopeRules.Kind kind) {
+        return kind == PlayerActionScopeRules.Kind.GRAVE_SNEAK ? ActorProvenance.Causality.DIRECT
+                : ActorProvenance.Causality.IMMEDIATE_SECONDARY;
     }
 
     /**

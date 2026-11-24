@@ -85,14 +85,18 @@ final class PlayerActionScopeRules {
         UNPROVEN
     }
 
-    /** The kinds of scope. USE and USE_ON are the player's use scopes. */
+    /**
+     * The kinds of scope. USE and USE_ON are the player's use scopes. GRAVE_SNEAK (graves design r6, 4.1; Q185) is a
+     * sneak take from a grave: no use scope, so it takes no inventory snapshot and is never a withdrawal candidate.
+     */
     enum Kind {
         USE,
         USE_ON,
         PLAYER_ACTION,
         DESTROY,
         INTERACT,
-        STEERED;
+        STEERED,
+        GRAVE_SNEAK;
 
         boolean isUse() {
             return this == USE || this == USE_ON;

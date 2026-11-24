@@ -29,6 +29,7 @@ public final class AuditEntryPresenter {
     private final RelativeAgeFormatter ages;
     private final AuditActionPresentationCatalog actions;
     private final Function<CompoundTag, EventTrailNbtUtil.StackDecodeResult> stackDecoder;
+    private final GraveWording graves;
 
     public AuditEntryPresenter(
             RelativeAgeFormatter ages,
@@ -40,9 +41,19 @@ public final class AuditEntryPresenter {
             RelativeAgeFormatter ages,
             AuditActionPresentationCatalog actions,
             Function<CompoundTag, EventTrailNbtUtil.StackDecodeResult> stackDecoder) {
+        this(ages, actions, stackDecoder, GraveWording.production());
+    }
+
+    /** Test seam: as the three-argument form, with the grave wording's mod-name lookup given. */
+    AuditEntryPresenter(
+            RelativeAgeFormatter ages,
+            AuditActionPresentationCatalog actions,
+            Function<CompoundTag, EventTrailNbtUtil.StackDecodeResult> stackDecoder,
+            GraveWording graves) {
         this.ages = Objects.requireNonNull(ages, "ages");
         this.actions = Objects.requireNonNull(actions, "actions");
         this.stackDecoder = Objects.requireNonNull(stackDecoder, "stackDecoder");
+        this.graves = Objects.requireNonNull(graves, "graves");
     }
 
     public LookupResultsView lookup(
@@ -172,6 +183,7 @@ public final class AuditEntryPresenter {
             AuditRecord record,
             AuditEvidence.ContainerTransfer transfer) {
         String itemPresentation;
+        Optional<String> graveText = Optional.empty();
         ContainerTransferPayloadCodec.DecodeResult decoded =
                 ContainerTransferPayloadCodec.decode(transfer.encodedPayload());
         if (decoded.successful() && transferMatches(decoded.payload(), transfer)) {
@@ -181,13 +193,16 @@ public final class AuditEntryPresenter {
             itemPresentation = capturedName != null ? capturedName
                     : DisplayNameResolver.itemDisplayName(transfer.itemId().toString())
                             + metadataFidelitySuffix(decoded.payload());
+            // Graves design r6, 1.9: a grave row's cause says whose grave it was instead of the container label.
+            graveText = graves.transfer(decoded.payload().providerId(), decoded.payload().shownCause(),
+                    record.attribution().indexedParty().playerId());
         } else {
             itemPresentation = EventTrailTextBounds.literalDisplayText(transfer.itemId().toString())
                     + " (stored transfer metadata unavailable)";
         }
         return transfer.quantity() + "× " + itemPresentation
-                + " • " + EventTrailTextBounds.containerTargetDisplayName(
-                        record.subject().presentationIdentity());
+                + " • " + graveText.orElseGet(() -> EventTrailTextBounds.containerTargetDisplayName(
+                        record.subject().presentationIdentity()));
     }
 
     private static String metadataFidelitySuffix(ContainerTransferPayload payload) {

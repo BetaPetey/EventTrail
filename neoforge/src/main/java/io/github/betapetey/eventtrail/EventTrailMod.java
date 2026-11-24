@@ -10,6 +10,8 @@ import io.github.betapetey.eventtrail.events.parts.PartRemovalItemCollector;
 import io.github.betapetey.eventtrail.events.platform.CommandCreditGuard;
 import io.github.betapetey.eventtrail.events.platform.OwnActionCreditGuard;
 import io.github.betapetey.eventtrail.events.platform.ScopeLeakSweeper;
+import io.github.betapetey.eventtrail.inventory.graves.GraveTakes;
+import io.github.betapetey.eventtrail.inventory.graves.OriginJoinListener;
 import io.github.betapetey.eventtrail.permissions.EventTrailPermissions;
 import io.github.betapetey.eventtrail.storage.AdvancedLogStorage;
 import io.github.betapetey.eventtrail.storage.JdbcShutdownDiagnostics;
@@ -24,6 +26,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -61,6 +64,13 @@ public final class EventTrailMod {
         NeoForge.EVENT_BUS.addListener(EventTrailMod::onServerStopping);
         NeoForge.EVENT_BUS.addListener(EventTrailMod::onServerStopped);
         NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST, PartRemovalItemCollector::onEntityJoin);
+        // Graves (design r6, 1.6.4 and 3.1): window joins, cancelled ones included; deferred entries cleared.
+        NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST, true, EntityJoinLevelEvent.class,
+                OriginJoinListener::onEntityJoin);
+        NeoForge.EVENT_BUS.addListener(EventPriority.NORMAL, false, PlayerEvent.PlayerLoggedOutEvent.class,
+                event -> GraveTakes.onPlayerLogout(event.getEntity().getUUID()));
+        NeoForge.EVENT_BUS.addListener(EventPriority.NORMAL, false, ServerStoppedEvent.class,
+                event -> GraveTakes.onServerStopped());
         io.github.betapetey.eventtrail.events.platform.PlayerActionScopes.register(NeoForge.EVENT_BUS);
         NeoForge.EVENT_BUS.register(EventTrailEventHandler.class);
         NeoForge.EVENT_BUS.register(InspectCommand.class);

@@ -2,6 +2,7 @@ package io.github.betapetey.eventtrail.inventory.action;
 
 import io.github.betapetey.eventtrail.audit.ActionRecordBatch;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
+import io.github.betapetey.eventtrail.audit.ShownCause;
 import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
 import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
@@ -21,6 +22,7 @@ import io.github.betapetey.eventtrail.util.RateLimitedDiagnosticGate;
 import net.minecraft.server.level.ServerPlayer;
 import org.apache.logging.log4j.LogManager;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +54,8 @@ import java.util.function.Predicate;
  *   none of the action's rows and is counted ({@link #notRecordedCount()}); a failure is also reported to the
  *   adapter's fail-safe and warned (rate-limited). The mod's trash is never affected.</li>
  *   <li>Each direction follows the configured container recording policy, as every container row does.</li>
+ *   <li>{@link #recordsFor} builds the same rows without writing them, for a caller whose own action's batch takes
+ *   them (graves design r6: a Tombstone take and its loss pairs).</li>
  * </ul>
  */
 public final class TrashMoveWriter {
@@ -176,21 +180,84 @@ public final class TrashMoveWriter {
         try {
             List<Move> checked = checked(moves);
             long actionId = NEXT_ACTION.incrementAndGet();
-            boolean stored = ActionRecordBatch.collect(sink, batch -> {
-                for (Move move : checked) {
-                    if (!recorded.test(move.direction())) continue;
-                    InventoryTransactionEvidence evidence = new InventoryTransactionEvidence(when, playerId,
-                            playerName, false, actionId, 1L, move.direction(), move.item(), move.quantity(),
-                            move.target(), providerId, EvidenceKind.AUTHORITATIVE_MOD_OPERATION,
-                            InventorySlotRole.STORAGE);
-                    batch.addAll(InventoryTransactionNormalizer.toAuditRecords(evidence, fullMetadata));
-                }
-            });
+            boolean stored = ActionRecordBatch.collect(sink, batch -> batch.addAll(records(when, playerId,
+                    playerName, actionId, providerId, checked, fullMetadata, recorded, null)));
             // A storage refusal is counted here; storage warns for its own refusals.
             return stored ? Outcome.WRITTEN : notRecorded(null, report);
         } catch (Throwable failure) {
             return notRecorded(failure, report);
         }
+    }
+
+    /**
+     * The rows of one action, built and not written (graves design r6, 2.2 hook 5 and F22): {@code records} holds
+     * them only when {@code outcome} is {@link Outcome#WRITTEN}, which here means every row was built; it is empty
+     * otherwise, and this class hands nothing to storage in any case.
+     */
+    public record Records(Outcome outcome, List<AuditRecord> records) {
+        public Records {
+            outcome = Objects.requireNonNull(outcome, "outcome");
+            records = List.copyOf(Objects.requireNonNull(records, "records"));
+            if (outcome != Outcome.WRITTEN && !records.isEmpty()) {
+                throw new IllegalArgumentException("Only a built action has rows");
+            }
+        }
+    }
+
+    /**
+     * The rows {@link #write} would write for the same action by {@code player}, with {@code withdrawalCause} on each
+     * container withdrawal's payload (the trash rows carry no cause), for a caller that puts them in its own action's
+     * one batch: the grave take and its Tombstone loss pairs (graves design r6, 2.2 hook 5, F22). The admission is
+     * {@code write}'s own, in the same order. {@link Outcome#NOT_RECORDED} (counted and reported here, as by
+     * {@code write}) means the caller must write none of its action's rows. A null cause gives exactly
+     * {@code write}'s rows.
+     */
+    public static Records recordsFor(AdapterKey key, String site, ServerPlayer player, String providerId,
+            List<Move> moves, ShownCause withdrawalCause) {
+        Consumer<Throwable> report = failure -> AdapterFailSafe.report(key, site, failure);
+        List<AuditRecord> built = new ArrayList<>();
+        Outcome outcome = admitted(player, EventTrailEventHandler::isFakePlayer, TrashMoveWriter::onServerThread,
+                EventTrailEventHandler::isAdmittedPlayer, () -> EventTrailManager.getInstance().admitCapture(),
+                admittedPlayer -> {
+                    Records records = recordsFor(System.currentTimeMillis(), admittedPlayer.getUUID(),
+                            admittedPlayer.getGameProfile().getName(), providerId, moves,
+                            EventTrailManager.getInstance().canAcceptAuditWrite(),
+                            ContainerTransactionRecordingPolicy::enabled, withdrawalCause, report);
+                    built.addAll(records.records());
+                    return records.outcome();
+                }, report);
+        return new Records(outcome, outcome == Outcome.WRITTEN ? built : List.of());
+    }
+
+    /** As the public {@code recordsFor}, after the player and runtime checks (test seam). */
+    static Records recordsFor(long when, UUID playerId, String playerName, String providerId, List<Move> moves,
+            boolean fullMetadata, Predicate<TransactionDirection> recorded, ShownCause withdrawalCause,
+            Consumer<Throwable> report) {
+        try {
+            List<Move> checked = checked(moves);
+            long actionId = NEXT_ACTION.incrementAndGet();
+            return new Records(Outcome.WRITTEN, records(when, playerId, playerName, actionId, providerId, checked,
+                    fullMetadata, recorded, withdrawalCause));
+        } catch (Throwable failure) {
+            return new Records(notRecorded(failure, report), List.of());
+        }
+    }
+
+    /** Every row of checked moves that the policy keeps, in order; the cause goes on container withdrawals only. */
+    private static List<AuditRecord> records(long when, UUID playerId, String playerName, long actionId,
+            String providerId, List<Move> checked, boolean fullMetadata, Predicate<TransactionDirection> recorded,
+            ShownCause withdrawalCause) {
+        List<AuditRecord> records = new ArrayList<>();
+        for (Move move : checked) {
+            if (!recorded.test(move.direction())) continue;
+            InventoryTransactionEvidence evidence = new InventoryTransactionEvidence(when, playerId,
+                    playerName, false, actionId, 1L, move.direction(), move.item(), move.quantity(),
+                    move.target(), providerId, EvidenceKind.AUTHORITATIVE_MOD_OPERATION,
+                    InventorySlotRole.STORAGE);
+            records.addAll(InventoryTransactionNormalizer.toAuditRecords(evidence, fullMetadata,
+                    move.trash() ? null : withdrawalCause));
+        }
+        return records;
     }
 
     /** Actions of which no row was written because of a failure or a storage refusal, since this process started. */

@@ -17,7 +17,7 @@ import java.util.Set;
  *
  * <p>Display only. The line folds in facts the published entry does not carry: a stopped hook family
  * ({@link HookVerdicts}), an adapter built without a supported behaviour path (its id ends with
- * {@code -off}), an addon beside a base that is not in use, the Sable location provider that could not be
+ * {@code -off}) or a key with no adapter yet ({@link #NO_ADAPTER_YET}), an addon beside a base that is not in use, the Sable location provider that could not be
  * loaded, and the actions skipped since server start. None of this is written back into the published
  * snapshot, {@link OptionalMenuAdapterLoader#compatibilitySnapshot()} or the capture gate
  * {@link OptionalMenuAdapterLoader#isRuntimeAdapterDisabled(String)}: a menu that still records keeps
@@ -47,6 +47,16 @@ public final class IntegrationStatusDisplay {
             AdapterKey.AE2, AdapterKey.REFINED_STORAGE, AdapterKey.INTEGRATED_TERMINALS, AdapterKey.OCCULTISM,
             AdapterKey.RFTOOLS_STORAGE, AdapterKey.POCKET_STORAGE, AdapterKey.CREATE, AdapterKey.ENDER_STORAGE,
             AdapterKey.STORAGE_IN_MOTION));
+
+    /**
+     * Graves L-0 (D-482, D-483): the bridge keys that have a key and a folder but no adapter yet. Their published entry
+     * is ON while the mod is installed (presence only, as every bridge key's), but nothing is recorded for them, so the
+     * line reads as an off-path adapter's: "off (no supported behaviour path was found; nothing is recorded)". A key
+     * leaves this set when its adapter lands.
+     */
+    static final Set<AdapterKey> NO_ADAPTER_YET = Collections.unmodifiableSet(EnumSet.of(
+            AdapterKey.GRAVESTONE, AdapterKey.TOMBSTONE, AdapterKey.SIMPLE_TOMB, AdapterKey.CORPSE, AdapterKey.YIGD,
+            AdapterKey.EPITAPHS, AdapterKey.MINECOLONIES));
 
     /**
      * The display facts of one entry. {@code stop} is null when its hook family runs; {@code baseStop} is the stop
@@ -79,7 +89,7 @@ public final class IntegrationStatusDisplay {
         if (key == null) return Facts.NONE;
         AdapterKey base = baseOf(key);
         return new Facts(
-                OptionalMenuAdapterLoader.offPath(key),
+                OptionalMenuAdapterLoader.offPath(key) || NO_ADAPTER_YET.contains(key),
                 HookVerdicts.stopOf(key).orElse(null),
                 baseOff(key, snapshot),
                 locationProviderUnavailable,
