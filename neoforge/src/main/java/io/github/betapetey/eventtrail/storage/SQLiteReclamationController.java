@@ -10,8 +10,10 @@ import org.apache.logging.log4j.LogManager;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 
 import static io.github.betapetey.eventtrail.storage.SQLiteReclamationPolicy.*;
 
@@ -27,6 +29,7 @@ final class SQLiteReclamationController {
     private final Operations operations;
     private final SQLiteReclamationStateFile stateFile;
     private final String binding;
+    private final LongSupplier nanoClock;
     private final AtomicBoolean running = new AtomicBoolean();
     private Episode episode;
     private SQLiteReclamationOperations.Observation observation;
@@ -48,9 +51,16 @@ final class SQLiteReclamationController {
 
     /** Deterministic policy tests supply fixed operations; production binds only its real storage-internal adapter. */
     SQLiteReclamationController(Operations operations, SQLiteReclamationStateFile stateFile, String binding) {
+        this(operations, stateFile, binding, System::nanoTime);
+    }
+
+    /** Tests may also supply the slice clock; production always uses {@link System#nanoTime()}. */
+    SQLiteReclamationController(Operations operations, SQLiteReclamationStateFile stateFile, String binding,
+                                LongSupplier nanoClock) {
         this.operations = operations;
         this.stateFile = stateFile;
         this.binding = binding;
+        this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
     }
 
     /** Runs before startup retention: invalid existing state baselines the OLD pool, never a fresh episode. */
@@ -92,7 +102,7 @@ final class SQLiteReclamationController {
 
     void afterRetention(long cutoff, RetentionResult retention, BooleanSupplier idleAdmission) {
         if (!running.compareAndSet(false, true)) return;
-        long started = System.nanoTime();
+        long started = nanoClock.getAsLong();
         long released = 0, reduced = 0, mainReduced = 0;
         long checkpointReductionBefore = checkpointMainReduction;
         State outcome = State.WAITING_FOR_IDLE;
@@ -187,7 +197,7 @@ final class SQLiteReclamationController {
             LogManager.getLogger("eventtrail").warn("Optional SQLite reclamation stopped; logical retention remains independent ({}).",
                     EventTrailDiagnostics.safeFailureSummary(failure));
         } finally {
-            lastSliceNanos = Math.max(0, System.nanoTime() - started);
+            lastSliceNanos = Math.max(0, nanoClock.getAsLong() - started);
             mainReduced = Math.addExact(mainReduced, checkpointMainReduction - checkpointReductionBefore);
             if (released > 0 || mainReduced > 0) lastResult = new StorageMaintenanceSnapshot.ReclamationResult(outcome,
                     System.currentTimeMillis(), Metric.exact(released), Metric.exact(Math.multiplyExact(reduced, PAGE_SIZE)),
@@ -232,7 +242,7 @@ final class SQLiteReclamationController {
     }
 
     private static boolean configured() { return EventTrailConfig.reclaimEnabled() && EventTrailConfig.LOG_RETENTION_DAYS.get() > 0; }
-    private static boolean withinSlice(long start) { return System.nanoTime() - start < SLICE_NANOS; }
+    private boolean withinSlice(long start) { return nanoClock.getAsLong() - start < SLICE_NANOS; }
     private static State map(SQLiteReclamationOperations.State state) {
         return switch (state) {
             case ELIGIBLE -> State.ELIGIBLE;
