@@ -17,6 +17,7 @@ import static io.github.betapetey.eventtrail.adapters.AdapterKey.BUILDING_GADGET
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.CREATE;
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.ENDER_STORAGE;
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.FUNCTIONAL_STORAGE;
+import static io.github.betapetey.eventtrail.adapters.AdapterKey.GRAVESTONE;
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.INTEGRATED_TERMINALS;
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.IRONS;
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.MINING_GADGETS;
@@ -34,11 +35,11 @@ import static io.github.betapetey.eventtrail.adapters.AdapterKey.SOPHISTICATED_S
 import static io.github.betapetey.eventtrail.adapters.AdapterKey.STORAGE_IN_MOTION;
 
 /**
- * The hook-to-key table: which adapter keys own each of the 120 optional-mod hook classes (work map R4-wire; the
+ * The hook-to-key table: which adapter keys own each of the 121 optional-mod hook classes (work map R4-wire; the
  * 112th, Sophisticated part 4's linked-group commit hook, was the first hook added after the count fixture's capture,
  * the next six are the AE2 in-place hook family of parts readers design-03 section 5, one key per hooked mod, the
- * 119th is the Create train carriage's rotation hook, Part 1 SA-create-mounted, and the 120th is the Create mounted
- * storage interaction call site, Part 1 SCM-ENDER).
+ * 119th is the Create train carriage's rotation hook, Part 1 SA-create-mounted, the 120th is the Create mounted
+ * storage interaction call site, Part 1 SCM-ENDER, and the 121st is Gravestone Mod's grave block, graves r6 M-GS).
  *
  * <p>Each row names one hook class, relative to the mixin package as in the hook list, and its keys. The first key is
  * the one the hook's own handlers report under; any further key is another family that needs the hook. A hook is
@@ -297,6 +298,9 @@ public final class HookCatalog {
                 "ae2inplace.AdvAeQuantumCrafterPasteMixin");
         one(rows, PARTS_APPLIED_PNEUMATICS_INPLACE,
                 "ae2inplace.ApnPatternPasteMixin");
+        // Graves design r6, 2.1 (M-GS): Gravestone Mod's grave block (the take, the spill and the removal).
+        one(rows, GRAVESTONE,
+                "gravestone.GraveStoneBlockMixin");
 
         Map<String, Entry> byClass = new LinkedHashMap<>();
         for (Entry row : rows) {

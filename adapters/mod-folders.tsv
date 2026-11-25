@@ -46,6 +46,7 @@ io.github.betapetey.eventtrail.inventory.adapters.enderstorage.EnderStorageMenuA
 io.github.betapetey.eventtrail.inventory.adapters.epitaphs.EpitaphsGraveSpec	epitaphs	epitaphs	support
 io.github.betapetey.eventtrail.inventory.adapters.functionalstorage.FunctionalStorageDirectActions	functionalstorage	functionalstorage	support
 io.github.betapetey.eventtrail.inventory.adapters.gravestone.GraveStoneGraveSpec	gravestone	gravestone	support
+io.github.betapetey.eventtrail.inventory.adapters.gravestone.GraveStoneGraves	gravestone	gravestone	support
 io.github.betapetey.eventtrail.inventory.adapters.integrated.IntegratedComponentStorageAccess	integrated	integratedterminals	support
 io.github.betapetey.eventtrail.inventory.adapters.integrated.IntegratedCountingStorageAccess	integrated	integratedterminals	support
 io.github.betapetey.eventtrail.inventory.adapters.integrated.IntegratedMenuCarrier	integrated	integratedterminals	support
@@ -189,6 +190,7 @@ io.github.betapetey.eventtrail.mixin.enderstorage.EnderItemCapabilityMixin	ender
 io.github.betapetey.eventtrail.mixin.enderstorage.EnderMenuCarrierMixin	enderstorage	enderstorage	mixin
 io.github.betapetey.eventtrail.mixin.enderstorage.EnderPouchOpenMixin	enderstorage	enderstorage	mixin
 io.github.betapetey.eventtrail.mixin.enderstorage.EnderStorageEpochMixin	enderstorage	enderstorage	mixin
+io.github.betapetey.eventtrail.mixin.gravestone.GraveStoneBlockMixin	gravestone	gravestone	mixin
 io.github.betapetey.eventtrail.mixin.integrated.IntegratedChannelMixin	integrated	integratedterminals	mixin
 io.github.betapetey.eventtrail.mixin.integrated.IntegratedComponentStorageAccessor	integrated	integratedterminals	mixin
 io.github.betapetey.eventtrail.mixin.integrated.IntegratedCountingStorageAccessor	integrated	integratedterminals	mixin

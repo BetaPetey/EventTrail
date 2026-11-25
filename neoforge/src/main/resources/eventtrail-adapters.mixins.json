@@ -124,7 +124,8 @@
     "ae2inplace.Ae2CraftingUnitUpgradeMixin",
     "ae2inplace.AdvAePatternPasteMixin",
     "ae2inplace.AdvAeQuantumCrafterPasteMixin",
-    "ae2inplace.ApnPatternPasteMixin"
+    "ae2inplace.ApnPatternPasteMixin",
+    "gravestone.GraveStoneBlockMixin"
   ],
   "injectors": {
     "defaultRequire": 0
