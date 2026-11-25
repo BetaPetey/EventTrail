@@ -1,0 +1,86 @@
+name: Bug report
+description: Report something in EventTrail that does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please fill in each field as well as you can.
+  - type: input
+    id: eventtrail-version
+    attributes:
+      label: EventTrail version
+      description: The version in the EventTrail jar's file name. If you built it yourself, also give the commit.
+      placeholder: "0.1.0-alpha.3"
+    validations:
+      required: true
+  - type: input
+    id: neoforge-version
+    attributes:
+      label: NeoForge version
+      placeholder: "21.1.247"
+    validations:
+      required: true
+  - type: input
+    id: minecraft-version
+    attributes:
+      label: Minecraft version
+      placeholder: "1.21.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database
+      description: The database EventTrail stores its records in.
+      options:
+        - SQLite
+        - MySQL
+        - PostgreSQL
+    validations:
+      required: true
+  - type: input
+    id: modpack
+    attributes:
+      label: Modpack and version
+      description: Leave this blank if you are not using a modpack.
+    validations:
+      required: false
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other mods involved
+      description: Any other mods that seem to be part of the problem.
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Paste the relevant part of the server log. Remove passwords and IP addresses before pasting.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Existing issues
+      options:
+        - label: I searched existing issues and this isn't already reported
+          required: true

@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest something new for EventTrail.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like EventTrail to do?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related mods or modpack
+    validations:
+      required: false
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+    validations:
+      required: false
