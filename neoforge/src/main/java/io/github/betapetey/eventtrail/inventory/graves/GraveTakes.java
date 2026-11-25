@@ -31,6 +31,7 @@ import net.minecraft.world.level.Level;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -58,7 +59,9 @@ import java.util.function.Supplier;
  *   go under the marker's acting player). Otherwise the mod's method runs and nothing is read or recorded
  *   ({@code grave-take-no-scope}).</li>
  *   <li>Before: the owner, contents and owner portions; the taker's 41 slots (main, armour, offhand) and Curios items;
- *   the own references with their counts. Only then the take context is opened (closed in a {@code finally}).</li>
+ *   the own references with their counts. Only then the take context is opened (closed in a {@code finally}). A spec
+ *   whose contents arrive during the call (r6 2.6) gives its contents and portions through {@link #contentsLoaded}
+ *   inside the call instead, and its grave counts as empty after it.</li>
  *   <li>The mod's method runs; a throw passes unchanged and nothing is recorded.</li>
  *   <li>After: contents, slots and Curios again; per identity {@code left = max(0, before - after)},
  *   {@code net} over the slots plus Curios (0 Curios gain unless both reads succeeded),
@@ -114,6 +117,42 @@ public final class GraveTakes {
             take.lost.merge(InventoryItemIdentity.of(stack), (long) stack.getCount(), Math::addExact);
         } catch (Throwable ignored) {
             // The loss is then unaccounted, counted at the take's end; the mod's roll is never affected.
+        }
+    }
+
+    /**
+     * Graves r6 2.6: inside the open take of a spec whose contents arrive during the call
+     * ({@link GraveAdapterSpec#contentsDuringCall()}), the list the mod has just loaded (Epitaphs' backup file). The
+     * first report of a take sets the grave's contents (in the list's order) and owner portions, copying the counts at
+     * once. A null list, a report inside a command (1.7), a report outside a take or inside a default spec's take, and
+     * any report after the take's first do nothing. A failure of the first report (the spec's portions throwing or
+     * returning null included) is kept on the take as its report: the take then records nothing, counts the grave's
+     * units unaccounted and reports the failure. Never throws.
+     *
+     * <p>Not closed: a report goes to the innermost open take context. With opted-in takes nested, a report made while
+     * the inner one is open is the inner one's; and a nested take that opens no context (one without scope, or one
+     * whose key is inactive) leaves the report of its mod's load to an open opted-in take outside it.</p>
+     */
+    public static void contentsLoaded(Collection<ItemStack> loaded) {
+        SpillTags.TakeFrame take = null;
+        try {
+            if (loaded == null || CommandPresence.inCommand()) return;
+            take = SpillTags.currentTake();
+            if (take == null || take.pilesOfLoaded == null || take.loaded != null || take.loadFailure != null) return;
+            Map<InventoryItemIdentity, Long> contents = loadedCounts(loaded);
+            Map<InventoryItemIdentity, OwnerPortions.Pile> piles = take.pilesOfLoaded.apply(contents);
+            take.piles.clear();
+            take.piles.putAll(piles);
+            take.loaded = contents;
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable failure) {
+            // Never interrupts the mod's call. The failure is the take's report: later reports are ignored, spills
+            // after it are tagged all unknown, and the take reports it after the call.
+            if (take != null && take.pilesOfLoaded != null && take.loaded == null && take.loadFailure == null) {
+                take.piles.clear();
+                take.loadFailure = failure;
+            }
         }
     }
 
@@ -377,13 +416,19 @@ public final class GraveTakes {
         }
         // Step 1.
         GraveOwnerFacts owner = spec.owner(grave, site);
-        Map<InventoryItemIdentity, Long> graveBefore = spec.contents(grave);
-        Map<InventoryItemIdentity, OwnerPortions.Pile> piles = OwnerPortions.piles(graveBefore,
-                spec.portions(grave, graveBefore, owner));
+        // r6 2.6: a grave whose contents arrive during the call is read through contentsLoaded only.
+        boolean duringCall = spec.contentsDuringCall();
+        Map<InventoryItemIdentity, Long> graveBefore = duringCall ? Map.of() : spec.contents(grave);
+        Map<InventoryItemIdentity, OwnerPortions.Pile> piles = duringCall ? Map.of()
+                : OwnerPortions.piles(graveBefore, spec.portions(grave, graveBefore, owner));
         IdentityHashMap<ItemStack, long[]> own = new IdentityHashMap<>();
         Map<InventoryItemIdentity, Long> slotsBefore = counts(live.slots(taker), own);
         Optional<Map<InventoryItemIdentity, Long>> curiosBefore = live.curios(taker);
         SpillTags.TakeFrame frame = new SpillTags.TakeFrame(identity.graveId(), piles, own);
+        if (duringCall) {
+            // As on the default path, a null result fails: reported, nothing recorded, never a guessed owner.
+            frame.pilesOfLoaded = contents -> OwnerPortions.piles(contents, spec.portions(grave, contents, owner));
+        }
         // Steps 2 and 3: the context is open only around the mod's call.
         SpillTags.openTake(frame);
         try {
@@ -391,8 +436,16 @@ public final class GraveTakes {
         } finally {
             SpillTags.closeTake(frame);
         }
-        // Step 4.
-        Map<InventoryItemIdentity, Long> graveAfter = spec.contents(grave);
+        // Step 4. r6 2.6: a grave whose contents arrived during the call holds nothing EventTrail can read after it;
+        // what the mod did not hand over stays unaccounted (counted), never credited. A failed report is counted and
+        // reported, and nothing is recorded, as when a read fails on the default path.
+        if (duringCall && frame.loadFailure != null) {
+            GraveCounts.count(GraveCounts.Reason.GRAVE_UNACCOUNTED);
+            live.report(spec.key(), site, frame.loadFailure);
+            return;
+        }
+        if (duringCall) graveBefore = frame.loaded != null ? frame.loaded : Map.of();
+        Map<InventoryItemIdentity, Long> graveAfter = duringCall ? Map.of() : spec.contents(grave);
         Map<InventoryItemIdentity, Long> slotsAfter = counts(live.slots(taker), null);
         Optional<Map<InventoryItemIdentity, Long>> curiosAfter = live.curios(taker);
         boolean curiosRead = curiosBefore.isPresent() && curiosAfter.isPresent();
@@ -452,6 +505,16 @@ public final class GraveTakes {
             if (stack == null || stack.isEmpty()) continue;
             counts.merge(InventoryItemIdentity.of(stack), (long) stack.getCount(), Math::addExact);
             if (own != null) own.put(stack, new long[] {stack.getCount(), 0L});
+        }
+        return counts;
+    }
+
+    /** Counts per identity of a list a mod loaded during its call (r6 2.6), in the list's order. */
+    static Map<InventoryItemIdentity, Long> loadedCounts(Collection<ItemStack> loaded) {
+        Map<InventoryItemIdentity, Long> counts = new LinkedHashMap<>();
+        for (ItemStack stack : loaded) {
+            if (stack == null || stack.isEmpty()) continue;
+            counts.merge(InventoryItemIdentity.of(stack), (long) stack.getCount(), Math::addExact);
         }
         return counts;
     }

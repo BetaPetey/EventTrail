@@ -44,6 +44,27 @@ public interface GraveAdapterSpec<G> {
     /** The grave's contents (1.1-3) as counts per identity, each above 0; empty for a grave that is gone. */
     Map<InventoryItemIdentity, Long> contents(G grave);
 
+    /**
+     * Graves r6 2.6: true for a grave whose contents can be read only once the mod's own call has loaded them (Epitaphs'
+     * backup file). Then a take reads no {@link #contents} before or after the call; the adapter reports the loaded
+     * list through {@link GraveTakes#contentsLoaded} from inside the call, and the grave counts as empty after it.
+     * False by default: the take reads {@link #contents} before and after the call.
+     *
+     * <p>For a spec that returns true:</p>
+     * <ul>
+     *   <li>{@link #portions} runs inside the mod's call, at the report, with the loaded counts and inside the take's
+     *   context, so it must not call mod code that spills or reports. A throw or a null result fails the take: it is
+     *   reported and counted unaccounted, and nothing is recorded.</li>
+     *   <li>Report the whole hand-over list in one call. The first report of a take wins: a partial first list loses the
+     *   rest without a count, and an empty first list locks the take. A null list is not a report.</li>
+     *   <li>{@link GraveTakes.TakeSplit#remaining()} is always empty, so {@link #afterTake} must not treat it as the
+     *   grave's state.</li>
+     * </ul>
+     */
+    default boolean contentsDuringCall() {
+        return false;
+    }
+
     /** The grave's owner portions (1.1-4); the default is the grave's owner, every unit. */
     default List<OwnerPortion> portions(G grave, Map<InventoryItemIdentity, Long> contents, GraveOwnerFacts owner) {
         return OwnerPortions.defaults(contents, owner);

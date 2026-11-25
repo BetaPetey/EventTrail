@@ -55,8 +55,8 @@ public final class IntegrationStatusDisplay {
      * leaves this set when its adapter lands.
      */
     static final Set<AdapterKey> NO_ADAPTER_YET = Collections.unmodifiableSet(EnumSet.of(
-            AdapterKey.GRAVESTONE, AdapterKey.TOMBSTONE, AdapterKey.SIMPLE_TOMB, AdapterKey.CORPSE, AdapterKey.YIGD,
-            AdapterKey.EPITAPHS, AdapterKey.MINECOLONIES));
+            AdapterKey.TOMBSTONE, AdapterKey.SIMPLE_TOMB, AdapterKey.CORPSE, AdapterKey.YIGD, AdapterKey.EPITAPHS,
+            AdapterKey.MINECOLONIES));
 
     /**
      * The display facts of one entry. {@code stop} is null when its hook family runs; {@code baseStop} is the stop

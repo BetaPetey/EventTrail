@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -36,8 +37,10 @@ import java.util.function.Supplier;
  * grave units the mod merged in, tagged (a grave part plus an {@code unlabelled} own part) and counted in
  * {@code spilledGrave}. Any other stack is a grave stack, tagged from the take's piles and counted in
  * {@code spilledGrave}. A site declared as handing the helper a copy is tagged all {@code unknown}, counted in
- * {@code uncertainSpilled} and {@code grave-spill-copied}, never credited. <b>Outside a take</b> every stack is a grave
- * stack, tagged from the origin's piles.</p>
+ * {@code uncertainSpilled} and {@code grave-spill-copied}, never credited. In the take of a grave whose contents arrive
+ * during the call (graves r6 2.6), the piles are empty until the mod reports its loaded list, so a spill before the
+ * report is tagged from empty piles, all {@code unknown}. <b>Outside a take</b> every stack is a grave stack, tagged
+ * from the origin's piles.</p>
  *
  * <p><b>Helper rules</b> (1.6.4 rules 1 to 4): only units of entities whose {@code addFreshEntity} returned true are
  * counted, summed per entity; a cancelled join counts nowhere ({@code origin-join-cancelled}); a pending spill lasts
@@ -92,6 +95,12 @@ public final class SpillTags {
         final Map<InventoryItemIdentity, Long> spilledGrave = new HashMap<>();
         final Map<InventoryItemIdentity, Long> uncertainSpilled = new HashMap<>();
         final Map<InventoryItemIdentity, Long> lost = new HashMap<>();
+        /** Graves r6 2.6: the piles of a list loaded during the call (contentsDuringCall), else null. */
+        Function<Map<InventoryItemIdentity, Long>, Map<InventoryItemIdentity, OwnerPortions.Pile>> pilesOfLoaded;
+        /** The contents the mod reported during the call (the first report only), else null. */
+        Map<InventoryItemIdentity, Long> loaded;
+        /** The failure of the take's first report during the call (it counts as the report), else null. */
+        Throwable loadFailure;
 
         TakeFrame(ResourceLocation graveId, Map<InventoryItemIdentity, OwnerPortions.Pile> piles,
                 IdentityHashMap<ItemStack, long[]> own) {
