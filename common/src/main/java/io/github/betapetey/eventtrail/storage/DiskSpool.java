@@ -35,15 +35,101 @@ import java.util.function.ToLongFunction;
  * connection goes through {@link #withConnection}, which asserts that rule (S-4, SpoolThreadRuleTest).
  *
  * <p>Lock order: {@code writeLifecycleLock -> stagingLock} and {@code spoolLock -> stagingLock}; the storage's
- * {@code writeLifecycleLock} and {@code spoolLock} are never held together. {@code stagingLock} is a leaf.</p>
+ * {@code writeLifecycleLock} and {@code spoolLock} are never held together. {@code stagingLock} is a leaf: no other
+ * lock is taken and no I/O is done under it. Q383 A: it also guards the cap test's mirrors (staged, waiting,
+ * unreadable, the published high-water): they change and are read for the cap test only under it.</p>
  */
 final class DiskSpool {
     private static final Logger LOGGER = LogManager.getLogger("eventtrail");
     static final String DIRECTORY = "spool";
-    static final int STAGING_MAX_ACTIONS = 4096;
-    static final long STAGING_MAX_RETAINED_BYTES = 32L * 1024L * 1024L;
+    /** No-drop item 2: at most this many staged actions per spool transaction; room comes back after each one. */
+    static final int COMMIT_CHUNK_ACTIONS = 4_096;
+    /**
+     * D-563 (B2): the least retained bytes one action can carry by the writer's estimate. Every action has at least one
+     * row, and every row's estimate starts at the codec's fixed 512 bytes (SchemaV1RowCodec.retainedBytes; a test pins
+     * the two together). So the hand-off's byte limit also bounds its action count: at most limit / 512 actions.
+     */
+    static final long MIN_ACTION_RETAINED_BYTES = 512L;
+    /**
+     * D-563 (B2), Owner Q405 A: the disk hand-off (staging) between admission and the spool thread holds actions in
+     * memory: the waiting room, the memory set aside for actions waiting to be written to disk. Its memory limit is
+     * {@link #handOffByteLimit} (the spool's size, fitted to the heap at startup). The Owner's rule (Q367 A as Q405 A
+     * rewrote it, with Q413 A, 4:03 PM 11-25): "Actions are dropped only when the disk spool is full, when the drive it
+     * is on has less than 512 MiB free, or when they arrive faster than the disk can take them for long enough to fill
+     * the memory set aside for them. Each case has its own WARN." ({@link #REFUSED_DISK_FULL}, {@link #REFUSED_FLOOR},
+     * {@link #REFUSED_WAITING_ROOM}). The action count needs no bound: the byte limit
+     * bounds it ({@link #MIN_ACTION_RETAINED_BYTES}). This field is a test seam only: tests may lower it before the
+     * first action to fill the waiting room quickly by count; a refusal there is the waiting room's too. Production
+     * leaves it at Integer.MAX_VALUE, which the byte limit always reaches first.
+     */
+    volatile int stagingMaxActions = Integer.MAX_VALUE;
+
+    /** Owner Q405 A: the disk part is full (the cap test, exact disk bytes). Its WARN is {@link #fullWarn}. */
+    static final String REFUSED_DISK_FULL = "full";
+    /**
+     * Owner Q405 A: the waiting room is full (the hand-off's memory limit, or the test seam). Its WARN is
+     * {@link #waitingRoomWarn}. The string is the one the "behind" counter has always used.
+     */
+    static final String REFUSED_WAITING_ROOM = "behind";
+    /**
+     * The drive's free space is below {@link #FLOOR_BYTES}. Owner Q413 A (4:03 PM 11-25): its own count ("drive low on
+     * space", {@link #refusedFloorRows}) and its own WARN ({@link #floorWarn}); never counted as "disk spool full".
+     */
+    static final String REFUSED_FLOOR = "floor";
+    /**
+     * Owner Q405 A: the spool's sequence numbers are used up; counted as "disk spool full", with no WARN of its own
+     * (Q413: it cannot happen in practice, more than a billion spooled actions between two empty starts).
+     */
+    static final String REFUSED_SEQUENCE = "sequence";
+
+    /** True for the refusals counted as "disk spool full" (the cap and the sequence limit; Q413 A: not the floor). */
+    static boolean countsAsDiskFull(String reason) {
+        return REFUSED_DISK_FULL.equals(reason) || REFUSED_SEQUENCE.equals(reason);
+    }
+
+    /** The close's commit rounds (D-563, live): the staged actions in chunks, plus the 64 rounds the close always had. */
+    static int closeCommitRounds(long stagedActionsNow) {
+        long chunks = (Math.max(0L, stagedActionsNow) + COMMIT_CHUNK_ACTIONS - 1) / COMMIT_CHUNK_ACTIONS;
+        return (int) Math.min(Integer.MAX_VALUE - 64L, chunks) + 64;
+    }
+
+    /**
+     * D-563, Owner Q397 A: the hand-off's most retained bytes (its memory limit) for a cap: the cap itself. Before
+     * Q397 it was cap / 1.5, the cap test's staged weight; the cap test now counts each staged action's exact disk
+     * bytes instead ({@link #refusal}), so the memory limit is no longer tied to it.
+     */
+    static long handOffMaxBytes(long capBytes) {
+        return Math.max(0L, capBytes);
+    }
+
+    /** D-563: the hand-off's most actions for a cap (the byte limit over the least bytes an action carries). */
+    static long handOffMaxActions(long capBytes) {
+        return handOffMaxBytes(capBytes) / MIN_ACTION_RETAINED_BYTES;
+    }
+
+    /**
+     * D-563, Owner Q405 A: the waiting room's memory limit, in retained bytes: {@link Settings#waitingRoomBytes}, at
+     * most {@link #handOffMaxBytes} of the cap, fitted to the heap at startup ({@link #fittedWaitingRoomBytes}). It does
+     * not depend on what waits on disk: the disk side is the cap test's, which counts each staged action's exact disk
+     * bytes ({@link #refusal}), at the configured cap on every server. A refusal at this limit is
+     * {@link #REFUSED_WAITING_ROOM}, never "full".
+     */
+    long handOffByteLimit() {
+        return settings.waitingRoomBytes();
+    }
+
+    /**
+     * Owner Q397 A: the disk room the cap leaves now, in exact disk bytes: the cap less the bytes waiting on disk, the
+     * unreadable ones and the staged actions' disk bytes. Takes no lock itself; every caller that decides on it calls
+     * it inside a {@code stagingLock} hold (Q383 A), so the mirrors are one consistent read.
+     */
+    private long diskRoomLocked() {
+        return settings.capBytes() - waitingBytes.get() - unreadableBytes.get() - stagedDiskBytes.get();
+    }
     static final long FLOOR_BYTES = 512L * 1024L * 1024L;
     static final long FLOOR_PROBE_MILLIS = 5_000L;
+    /** Owner Q413 (b) A: the least time between two writes of the same drop WARN (10 minutes). */
+    static final long DROP_WARN_REARM_GAP_MILLIS = 10L * 60L * 1000L;
     static final long STORE_FAILURE_PAUSE_MILLIS = 60_000L;
     static final long OPEN_WAIT_MILLIS = 5_000L;
     static final long CLOSE_WAIT_MILLIS = 5_000L;
@@ -54,10 +140,16 @@ final class DiskSpool {
     static final int BACKEND_POSTGRESQL = 3;
     private static final long MIB = 1024L * 1024L;
 
-    /** Everything a test may replace; production uses {@link #production}. */
+    /**
+     * Everything a test may replace; production uses {@link #production}. {@code capBytes} is the disk spool's size,
+     * the configured one on every server (Owner Q405 A); {@code waitingRoomBytes} is the waiting room's memory limit
+     * ({@link #handOffByteLimit}), and {@code maxHeapBytes} the server's maximum heap that the startup check read (0
+     * when none was read). When the waiting room is below {@link #handOffMaxBytes} of the cap, the startup check
+     * lowered it to fit the heap ({@link #fittedWaitingRoomBytes}).
+     */
     record Settings(boolean enabled, long capBytes, int retentionDays, boolean deleteKeptAfterRetention,
                     SpoolFile.ConnectionFactory factory, LongSupplier clock, ToLongFunction<Path> usableSpace,
-                    OpenHook openHook) {
+                    OpenHook openHook, long waitingRoomBytes, long maxHeapBytes) {
         Settings {
             Objects.requireNonNull(factory, "factory");
             Objects.requireNonNull(clock, "clock");
@@ -65,17 +157,152 @@ final class DiskSpool {
             if (openHook == null) openHook = () -> {};
         }
 
-        static Settings production(boolean enabled, int maxMegabytes, int retentionDays) {
-            return new Settings(enabled, Math.max(1L, maxMegabytes) * MIB, retentionDays,
-                    SpoolFile.DELETE_KEPT_AFTER_RETENTION, SpoolFile.ConnectionFactory.bundled(),
-                    System::currentTimeMillis, DiskSpool::usableSpace, null);
+        /** The shape before Q367: the waiting room is the whole of the cap ({@link #handOffMaxBytes}), no heap read. */
+        Settings(boolean enabled, long capBytes, int retentionDays, boolean deleteKeptAfterRetention,
+                 SpoolFile.ConnectionFactory factory, LongSupplier clock, ToLongFunction<Path> usableSpace,
+                 OpenHook openHook) {
+            this(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, openHook,
+                    handOffMaxBytes(capBytes), 0L);
         }
 
-        Settings withClock(LongSupplier c) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, c, usableSpace, openHook); }
-        Settings withUsableSpace(ToLongFunction<Path> u) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, u, openHook); }
-        Settings withOpenHook(OpenHook h) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, h); }
-        Settings withFactory(SpoolFile.ConnectionFactory f) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, f, clock, usableSpace, openHook); }
-        Settings withDeleteKept(boolean d) { return new Settings(enabled, capBytes, retentionDays, d, factory, clock, usableSpace, openHook); }
+        static Settings production(boolean enabled, int maxMegabytes, int retentionDays) {
+            return production(enabled, maxMegabytes, retentionDays, Runtime.getRuntime().maxMemory());
+        }
+
+        /**
+         * Owner Q405 A: the configured disk size, unchanged on every server, and the waiting room fitted at startup to
+         * the heap ({@link #fittedWaitingRoomBytes}).
+         */
+        static Settings production(boolean enabled, int maxMegabytes, int retentionDays, long maxHeapBytes) {
+            long configured = Math.max(1L, maxMegabytes) * MIB;
+            return new Settings(enabled, configured, retentionDays,
+                    SpoolFile.DELETE_KEPT_AFTER_RETENTION, SpoolFile.ConnectionFactory.bundled(),
+                    System::currentTimeMillis, DiskSpool::usableSpace, null,
+                    fittedWaitingRoomBytes(configured, maxHeapBytes), maxHeapBytes);
+        }
+
+        /** Owner Q405 A: true when the startup check lowered the waiting room below the whole of the cap. */
+        boolean waitingRoomLowered() { return waitingRoomBytes < handOffMaxBytes(capBytes); }
+
+        Settings withClock(LongSupplier c) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, c, usableSpace, openHook, waitingRoomBytes, maxHeapBytes); }
+        Settings withUsableSpace(ToLongFunction<Path> u) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, u, openHook, waitingRoomBytes, maxHeapBytes); }
+        Settings withOpenHook(OpenHook h) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, h, waitingRoomBytes, maxHeapBytes); }
+        Settings withFactory(SpoolFile.ConnectionFactory f) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, f, clock, usableSpace, openHook, waitingRoomBytes, maxHeapBytes); }
+        Settings withDeleteKept(boolean d) { return new Settings(enabled, capBytes, retentionDays, d, factory, clock, usableSpace, openHook, waitingRoomBytes, maxHeapBytes); }
+        /** Test helper: the same settings with the waiting room's memory limit set to {@code w}. */
+        Settings withWaitingRoom(long w) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, openHook, w, maxHeapBytes); }
+    }
+
+    // ---- Q367 A, as Owner Q405 A rewrote it: the startup memory check fits the waiting room, not the disk ----------
+    //
+    // The burst memory is the waiting room at its most (the disk hand-off's memory limit, retained bytes by the
+    // writer's estimate) plus the database writer's memory queue (WRITER_MEMORY_BYTES). The heap a burst really takes
+    // is HEAP_PER_RETAINED_BYTE times that estimate plus a fixed part (BURST_FIXED_HEAP_BYTES: encoding, the spool
+    // thread's chunk, and garbage not yet collected). The check keeps it within SAFE_HEAP_SHARE of the server's
+    // maximum heap:
+    //
+    //     HEAP_PER_RETAINED_BYTE * (waitingRoom + WRITER_MEMORY_BYTES) + BURST_FIXED_HEAP_BYTES
+    //         <= SAFE_HEAP_SHARE * maxHeap
+    //
+    // so the largest safe waiting room is (SAFE_HEAP_SHARE * maxHeap - BURST_FIXED_HEAP_BYTES)
+    // / HEAP_PER_RETAINED_BYTE - WRITER_MEMORY_BYTES, rounded down to a whole MiB, never below MIN_WAITING_ROOM_BYTES
+    // and never above the whole of the cap (handOffMaxBytes(cap), the cap itself since Owner Q397 A). Owner Q405 A:
+    // the disk spool keeps its configured size on every server; only the waiting room is fitted, and a refusal there
+    // has its own cause and WARN (REFUSED_WAITING_ROOM, waitingRoomWarn). A 512 MiB spool needs 3,648 MiB of heap for
+    // a waiting room of the whole 512 MiB.
+    //
+    // Basis (loaded window 2, 11-25, W\runs\lw2-run1.facts.txt; 512 MiB test heap, 100,000-row B2/H1 bursts on SQLite,
+    // MySQL and PostgreSQL at a 512 MiB spool, and one SQLite leg at 128 MiB): peak heap used above a post-GC baseline,
+    // over the peak hand-off plus memory-queue retained bytes, was 0.98 to 1.45 at 512 MiB (worst MySQL B2: 309 MiB
+    // for 223 MB) and 2.31 at 128 MiB (230 MiB for 104 MB), which shows a fixed part. 1.5 per byte plus 96 MiB covers
+    // every leg (the 128 MiB leg: 245 MiB for 230 measured). Peak heap used counts garbage not yet collected, so it is
+    // an upper bound. SAFE_HEAP_SHARE is a policy choice, not a measurement.
+    //
+    // PROVISIONAL (Owner Q370 B, 11-25): HEAP_PER_RETAINED_BYTE and BURST_FIXED_HEAP_BYTES, the clamp's two measured
+    // numbers, keep these values only until the B2 latency fix lands; they are set from that fix's re-run.
+
+    /** The database writer's memory queue, in retained bytes (AbstractJdbcStorage.MAX_PENDING_PAYLOAD_BYTES). */
+    static final long WRITER_MEMORY_BYTES = 32L * MIB;
+    /**
+     * The smallest waiting room the startup check fits (Owner Q405 A); the same 64 MiB as the smallest spool size the
+     * configuration allows (database.spool.maxMegabytes minimum 64), so a waiting room is never lowered below it.
+     */
+    static final long MIN_WAITING_ROOM_BYTES = 64L * MIB;
+    /** The share of the server's maximum heap the spool's burst memory may take (policy; see the basis above). */
+    static final double SAFE_HEAP_SHARE = 0.25;
+    /**
+     * PROVISIONAL (Q370 B; set after the B2 fix's re-run). Heap bytes per retained byte of the writer's estimate
+     * (loaded window 2: worst 1.45 at 512 MiB, rounded up).
+     */
+    static final double HEAP_PER_RETAINED_BYTE = 1.5;
+    /**
+     * PROVISIONAL (Q370 B; set after the B2 fix's re-run). The fixed part of a burst's heap (loaded window 2: the
+     * 128 MiB leg's 230 MiB needs it; see the basis above).
+     */
+    static final long BURST_FIXED_HEAP_BYTES = 96L * MIB;
+
+    /** The burst memory, in heap bytes, a waiting room of {@code waitingRoomBytes} allows (the formula above). */
+    static long burstHeapBytes(long waitingRoomBytes) {
+        return (long) Math.ceil(HEAP_PER_RETAINED_BYTE * (Math.max(0L, waitingRoomBytes) + WRITER_MEMORY_BYTES))
+                + BURST_FIXED_HEAP_BYTES;
+    }
+
+    /**
+     * Owner Q405 A: the waiting room for a spool of {@code capBytes} on a heap of {@code maxHeapBytes}: the whole of
+     * the cap ({@link #handOffMaxBytes}) when its burst memory fits {@link #SAFE_HEAP_SHARE} of the heap, else the
+     * largest whole-MiB waiting room that fits, at least {@link #MIN_WAITING_ROOM_BYTES} (and never above the whole).
+     * A heap of 0 or Long.MAX_VALUE (none read, or no limit) changes nothing. The disk cap is never changed.
+     */
+    static long fittedWaitingRoomBytes(long capBytes, long maxHeapBytes) {
+        long whole = handOffMaxBytes(capBytes);
+        if (maxHeapBytes <= 0L || maxHeapBytes == Long.MAX_VALUE || whole <= MIN_WAITING_ROOM_BYTES) return whole;
+        double budget = SAFE_HEAP_SHARE * maxHeapBytes;
+        if (burstHeapBytes(whole) <= budget) return whole;
+        double fitting = (budget - BURST_FIXED_HEAP_BYTES) / HEAP_PER_RETAINED_BYTE - WRITER_MEMORY_BYTES;
+        long wholeMib = fitting <= 0d ? 0L : ((long) Math.floor(fitting)) / MIB * MIB;
+        // The division above is in floating point; settle the last MiB against burstHeapBytes itself, so the size is
+        // exactly the largest whole MiB that fits (a boundary like 416 MiB on 3 GiB is not lost to rounding).
+        while (wholeMib + MIB < whole && burstHeapBytes(wholeMib + MIB) <= budget) wholeMib += MIB;
+        while (wholeMib > MIN_WAITING_ROOM_BYTES && burstHeapBytes(wholeMib) > budget) wholeMib -= MIB;
+        return Math.min(whole, Math.max(MIN_WAITING_ROOM_BYTES, wholeMib));
+    }
+
+    /**
+     * The least maximum heap, in whole MiB rounded up, on which a spool of {@code capBytes} keeps a waiting room of the
+     * whole cap: that waiting room's burst memory over {@link #SAFE_HEAP_SHARE}.
+     */
+    static long heapMibNeededFor(long capBytes) {
+        return (long) Math.ceil(burstHeapBytes(handOffMaxBytes(capBytes)) / SAFE_HEAP_SHARE / MIB);
+    }
+
+    /**
+     * Owner Q405 A: the startup WARN when the waiting room was lowered to fit the heap; null when it was not. The
+     * Owner's admin-facing text (Q412 A, owner-texts-q405.md item a). Owner Q420 A: its "dropped only when" sentence
+     * names all three drop cases, with this WARN's own waiting-room figure.
+     */
+    static String waitingRoomLoweredWarn(Settings settings) {
+        if (!settings.waitingRoomLowered()) return null;
+        long room = settings.waitingRoomBytes() / MIB;
+        long cap = settings.capBytes() / MIB;
+        return "EventTrail set aside " + room + " MiB of memory for actions waiting to be written to disk, less than"
+                + " the disk spool's " + cap + " MiB, because the server's maximum memory is "
+                + settings.maxHeapBytes() / MIB + " MiB. The disk spool keeps its full " + cap + " MiB."
+                + " Actions are dropped only when the disk spool is full, when the drive it is on has less than "
+                + FLOOR_BYTES / MIB + " MiB free, or when they arrive faster than the disk can take them for long"
+                + " enough to fill those " + room + " MiB. To set aside the full " + cap + " MiB, give the server at least "
+                + heapMibNeededFor(settings.capBytes()) + " MiB (-Xmx).";
+    }
+
+    /**
+     * Owner Q405 A: the status line when the waiting room was lowered; null when it was not. The Owner's admin-facing
+     * text (Q412 A, owner-texts-q405.md item b).
+     */
+    static String waitingRoomLoweredStatusLine(Settings settings) {
+        if (!settings.waitingRoomLowered()) return null;
+        return "Memory for actions waiting to be written to disk: " + settings.waitingRoomBytes() / MIB
+                + " MiB, lowered from " + settings.capBytes() / MIB + " MiB to fit the server's "
+                + settings.maxHeapBytes() / MIB + " MiB of memory; the disk spool keeps its "
+                + settings.capBytes() / MIB + " MiB";
     }
 
     /** Test seam: runs on the spool thread before the open (an injected slow open, design-02 13.1). */
@@ -84,8 +311,11 @@ final class DiskSpool {
         void beforeOpen() throws Exception;
     }
 
-    /** One staged action (design-02 4.3): the rows admission built, their retained bytes, the capture time. */
-    record Staged(List<SchemaV1Row> rows, long retainedBytes, long minRowTs, long capturedMillis) {}
+    /**
+     * One staged action (design-02 4.3): the rows admission built, their retained bytes (the memory limit's count),
+     * their exact disk bytes once committed (the cap test's count, Owner Q397 A), the capture time.
+     */
+    record Staged(List<SchemaV1Row> rows, long retainedBytes, long diskBytes, long minRowTs, long capturedMillis) {}
 
     /** What the open found (design-02 5.1 steps 1 to 4), handed to init. */
     record OpenOutcome(String offReason, boolean disabled, long disabledWaiting, SpoolFile.Meta meta, boolean fresh,
@@ -151,7 +381,32 @@ final class DiskSpool {
     private volatile long requestedDeleteThrough = -1L;
     private volatile long oldestAppendedMillis = -1L;
     private volatile boolean firstUseWarned;
-    private volatile boolean fullWarned;
+    /**
+     * Owner Q413 (b) A (4:03 PM 11-25): each drop WARN (disk spool full, waiting room full, drive low on space) is
+     * written once per episode. The flag is set when the WARN is written and cleared, under {@code stagingLock}, once
+     * the spool is empty again ({@link #clearFullFlagsIfEmptyLocked}); two writes of the same WARN are at least
+     * {@link #DROP_WARN_REARM_GAP_MILLIS} apart (its {@code ...WarnMillis}, the spool clock when it was last written).
+     * All six are read and written only under {@code stagingLock}.
+     */
+    private boolean fullWarned;
+    private boolean waitingRoomWarned;
+    private boolean floorWarned;
+    private long fullWarnMillis = Long.MIN_VALUE;
+    private long waitingRoomWarnMillis = Long.MIN_VALUE;
+    private long floorWarnMillis = Long.MIN_VALUE;
+    /** Owner Q413 (a) A: the drive's free bytes at the last floor probe. */
+    private volatile long lastUsableBytes = Long.MAX_VALUE;
+    /** Owner Q413 (a) A: {@link #lastUsableBytes} when the floor WARN was queued, the figure that WARN names. */
+    private volatile long floorWarnUsableBytes = Long.MAX_VALUE;
+    /**
+     * Owner Q405 A (check-q397 MINOR-2): the last room refusal was the disk's ({@code diskFullSeen}) or the waiting
+     * room's ({@code waitingRoomFullSeen}); set when one is counted, cleared by the next action staged. The status says
+     * FULL from them as well as from the figures, so it agrees with the WARN that fired. Q405 re-check MAJOR-A: also
+     * cleared, under {@code stagingLock}, where that part gets room back (the waiting room when staged actions leave,
+     * the disk part at a delete or a drop) and both when the spool is empty; set only while the spool holds something.
+     */
+    private volatile boolean diskFullSeen;
+    private volatile boolean waitingRoomFullSeen;
     private volatile boolean storeErrorWritten;
     private volatile boolean unreadableErrorWritten;
 
@@ -159,6 +414,8 @@ final class DiskSpool {
     private final AtomicLong stagedActions = new AtomicLong();
     private final AtomicLong stagedRows = new AtomicLong();
     private final AtomicLong stagedRetainedBytes = new AtomicLong();
+    /** Owner Q397 A: the staged actions' exact disk bytes (the cap test's count); changed only under stagingLock. */
+    private final AtomicLong stagedDiskBytes = new AtomicLong();
     private final AtomicLong waitingFrames = new AtomicLong();
     private final AtomicLong waitingRows = new AtomicLong();
     private final AtomicLong waitingBytes = new AtomicLong();
@@ -177,6 +434,10 @@ final class DiskSpool {
     final AtomicLong carriedInWrittenRows = new AtomicLong();
     final AtomicLong carriedInLostActions = new AtomicLong();
     final AtomicLong refusedFullRows = new AtomicLong();
+    /** No-drop item 2: dropped because the disk hand-off was full (the spool thread behind), not the disk cap. */
+    final AtomicLong refusedBehindRows = new AtomicLong();
+    /** Owner Q413 (a) A: dropped because the drive had less than {@link #FLOOR_BYTES} free ("drive low on space"). */
+    final AtomicLong refusedFloorRows = new AtomicLong();
     final AtomicLong refusedUnwritableRows = new AtomicLong();
     final AtomicLong refusedOffRows = new AtomicLong();
     final AtomicLong admittedPastActions = new AtomicLong();
@@ -423,13 +684,21 @@ final class DiskSpool {
     private void install(SpoolFile opened) {
         file = opened;
         SpoolFile.Meta meta = opened.meta();
-        waitingFrames.set(meta.waitingFrames());
-        waitingRows.set(meta.waitingRows());
-        waitingBytes.set(meta.waitingBytes());
-        unreadableFrames.set(meta.unreadableFrames());
-        unreadableRows.set(meta.unreadableRows());
-        unreadableBytes.set(meta.unreadableBytes());
-        publishedHighWater.set(meta.highWater());
+        // Q383 A: the cap test's mirrors change only under stagingLock (a leaf; here possibly under spoolLock, the
+        // documented order spoolLock -> stagingLock). No I/O inside.
+        synchronized (stagingLock) {
+            long onDiskBefore = waitingBytes.get() + unreadableBytes.get();
+            waitingFrames.set(meta.waitingFrames());
+            waitingRows.set(meta.waitingRows());
+            waitingBytes.set(meta.waitingBytes());
+            unreadableFrames.set(meta.unreadableFrames());
+            unreadableRows.set(meta.unreadableRows());
+            unreadableBytes.set(meta.unreadableBytes());
+            publishedHighWater.set(meta.highWater());
+            // Q405 re-check MAJOR-A: as refreshMirrors (a file set aside or replaced gives the disk part room back).
+            if (meta.waitingBytes() + meta.unreadableBytes() < onDiskBefore) diskFullSeen = false;
+            clearFullFlagsIfEmptyLocked();
+        }
         if (meta.waitingFrames() > 0) oldestAppendedMillis = settings.clock().getAsLong();
         liveSpoolIdHex = meta.spoolIdHex();
     }
@@ -468,12 +737,14 @@ final class DiskSpool {
 
     void raiseHighWaterOnSpoolThread(long position) throws Exception {
         withConnectionChecked(() -> { file.raiseHighWater(position); return null; });
-        publishedHighWater.set(Math.max(publishedHighWater.get(), position));
+        synchronized (stagingLock) { publishedHighWater.set(Math.max(publishedHighWater.get(), position)); }
     }
 
     void rebindOnSpoolThread(boolean resetSequence) throws Exception {
         withConnectionChecked(() -> { file.rebind(binding, resetSequence); return null; });
-        if (resetSequence) publishedHighWater.set(0);
+        if (resetSequence) {
+            synchronized (stagingLock) { publishedHighWater.set(0); }
+        }
         liveSpoolIdHex = file.meta().spoolIdHex();
     }
 
@@ -629,12 +900,25 @@ final class DiskSpool {
 
     // ---- admission (design-02 4.3; no SQLite, no file I/O) ----------------------------------------------------
 
-    /** The latch: waiting + staged > 0 (design-02 4.2, the Advisor's n-1: one definition). */
+    /**
+     * The latch: waiting + staged > 0 (design-02 4.2, the Advisor's n-1: one definition). Lock-free. Q383 A: staged is
+     * read first. A commit raises waiting before it lowers staged (both in one {@code stagingLock} step), so a read
+     * that straddles the commit sees either the old staged count or the new waiting count, never 0 for both.
+     */
     boolean latched() {
-        return waitingFrames.get() + stagedActions.get() > 0;
+        long staged = stagedActions.get();
+        Runnable gap = latchedGapSeamForTest;
+        if (gap != null) gap.run();
+        return staged + waitingFrames.get() > 0;
     }
 
-    /** Per action: can the spool take one action of {@code retainedBytes}? Atomic mirrors only. */
+    /** Q383 A test seam: runs between {@link #latched}'s two reads (null in production). */
+    volatile Runnable latchedGapSeamForTest;
+
+    /**
+     * Per action: can the spool take one action of {@code retainedBytes}? Decided by {@link #refusal}: a few reads
+     * under the leaf {@code stagingLock} (Q383 A), no I/O.
+     */
     boolean canAccept(long retainedBytes) {
         return refusal(retainedBytes) == null;
     }
@@ -644,57 +928,162 @@ final class DiskSpool {
         return canAccept(512L);
     }
 
-    /** null when the spool can accept; else the breakdown of a refusal: "full", "unwritable" or "off". */
+    /**
+     * {@link #refusal(long, long)} for an action whose disk bytes are taken as its retained bytes (the capacity hint
+     * and tests that give one figure). Admission gives the exact disk bytes (Owner Q397 A).
+     */
     String refusal(long retainedBytes) {
+        return refusal(retainedBytes, retainedBytes);
+    }
+
+    /**
+     * null when the spool can accept; else the breakdown of a refusal: {@link #REFUSED_DISK_FULL} (the disk cap),
+     * {@link #REFUSED_FLOOR} (the drive's free-space floor), {@link #REFUSED_SEQUENCE} (the sequence limit),
+     * {@link #REFUSED_WAITING_ROOM} (the waiting room's memory limit, or the test seam {@link #stagingMaxActions}),
+     * "unwritable" or "off". No-drop item 2 (Owner Q330 A, the lock wait): a paused replay or a position check still
+     * waiting no longer turns the spool away; new actions wait on disk behind the paused ones (the latch), and while
+     * the check waits they stay staged until it settles ({@link #loop}). The caller counts a refusal from this one
+     * result and never asks again (the B2 mislabel: a second read could find room and say "off").
+     *
+     * <p>Owner Q397 A: the cap test counts exact disk bytes. {@code diskBytes} is the action's encoded frame length
+     * ({@link SpoolFrameCodec#encodedLength}); the bytes waiting on disk and the unreadable ones are frame lengths
+     * too, and each staged action counts its own frame length, so "full" means the disk bytes, counted exactly, would
+     * pass the cap. Owner Q405 A: the waiting room's memory limit ({@link #handOffByteLimit}, fitted to the heap) is
+     * the second room test, with its own cause, so a waiting-room refusal while the disk has room is never "full".</p>
+     *
+     * <p>Q383 A (the Q379 double count): the cap test reads the staged, waiting, unreadable and high-water mirrors
+     * under {@code stagingLock}, and the spool thread changes them only under that lock, a commit in one step
+     * ({@link #commitBatch}). So a committed chunk is never counted both as waiting on disk and as staged, and the
+     * test never pairs an old staged value with a new waiting one. The lock is a leaf, held here for a few reads; the
+     * caller may hold {@code writeLifecycleLock} (the documented order).</p>
+     */
+    String refusal(long retainedBytes, long diskBytes) {
+        Runnable seam = refusalSeamForTest;
+        if (seam != null) seam.run();
         if (state != State.READY || closeRequested) return "off";
-        if (!positionSettled || replayStoppedReason != null || replayPaused) return "off";
+        if (replayStoppedReason != null) return "off";
         if (damagedReason != null) return "unwritable";
         if (settings.clock().getAsLong() < storePauseUntilMillis) return "unwritable";
-        if (belowFloor) return "full";
-        long actions = stagedActions.get();
-        long staged = stagedRetainedBytes.get();
-        if (actions + 1 > STAGING_MAX_ACTIONS || staged + retainedBytes > STAGING_MAX_RETAINED_BYTES) return "full";
-        if (publishedHighWater.get() + actions + 1 > MAX_SEQUENCE) return "full";
-        double projected = waitingBytes.get() + unreadableBytes.get() + 1.5d * (staged + (double) retainedBytes);
-        if (projected > settings.capBytes()) return "full";
-        return null;
+        if (belowFloor) return REFUSED_FLOOR;
+        synchronized (stagingLock) {
+            long actions = stagedActions.get();
+            if (publishedHighWater.get() + actions + 1 > MAX_SEQUENCE) return REFUSED_SEQUENCE;
+            if (diskBytes > diskRoomLocked()) return REFUSED_DISK_FULL;
+            if (stagedRetainedBytes.get() + retainedBytes > handOffByteLimit()) return REFUSED_WAITING_ROOM;
+            if (actions + 1 > stagingMaxActions) return REFUSED_WAITING_ROOM;
+            return null;
+        }
+    }
+
+    /** D-563 test seam: runs at the start of each {@link #refusal} read (null in production). */
+    volatile Runnable refusalSeamForTest;
+
+    /**
+     * No-drop item 2: room left in the disk hand-off. Actions here: one lock-free read of the staged count against
+     * {@link #stagingMaxActions} (a test seam; no limit in production). Retained bytes: {@link #handOffFreeBytes},
+     * under {@code stagingLock}.
+     */
+    long handOffFreeActions() {
+        return Math.max(0L, stagingMaxActions - stagedActions.get());
+    }
+
+    /** Q383 A: under {@code stagingLock}, so a committing chunk is not counted both as waiting and as staged. */
+    long handOffFreeBytes() {
+        Runnable seam = handOffFreeSeamForTest;
+        if (seam != null) seam.run();
+        synchronized (stagingLock) {
+            return Math.max(0L, handOffByteLimit() - stagedRetainedBytes.get());
+        }
+    }
+
+    /** Q383 A test seam: runs at the start of each {@link #handOffFreeBytes}, before its lock (null in production). */
+    volatile Runnable handOffFreeSeamForTest;
+
+    /**
+     * Owner Q397 A: the disk room the cap leaves now, in exact disk bytes (never below 0); under {@code stagingLock},
+     * as {@link #handOffFreeBytes}.
+     */
+    long diskFreeBytes() {
+        synchronized (stagingLock) {
+            return Math.max(0L, diskRoomLocked());
+        }
     }
 
     /**
      * Stages one action behind the waiting ones; a pointer move under the leaf {@code stagingLock}. The caller
-     * holds {@code writeLifecycleLock} and has just checked {@link #canAccept}. Returns false when the staging
-     * bound no longer holds (never partly staged).
+     * holds {@code writeLifecycleLock} and has just checked {@link #canAccept}. Returns false when the hand-off no
+     * longer has room (never partly staged). Its disk bytes are worked out here (Owner Q397 A).
      */
     boolean stage(List<SchemaV1Row> rows, long retainedBytes, long capturedMillis) {
-        Staged entry = new Staged(rows, retainedBytes, SpoolFrameCodec.minTimestamp(rows), capturedMillis);
+        return stageOrRefusal(rows, retainedBytes, capturedMillis) == null;
+    }
+
+    /**
+     * D-563: {@link #stage}, with the reason when the spool no longer has room under the lock
+     * ({@link #REFUSED_DISK_FULL} for the disk, {@link #REFUSED_WAITING_ROOM} for the waiting room or the test seam),
+     * so the caller counts that reason and never reads {@link #refusal} a second time. null when staged. The action's
+     * disk bytes are worked out here, before the lock (Owner Q397 A).
+     */
+    String stageOrRefusal(List<SchemaV1Row> rows, long retainedBytes, long capturedMillis) {
+        return stageOrRefusal(rows, retainedBytes, SpoolFrameCodec.encodedLength(rows), false, 0L, capturedMillis);
+    }
+
+    /** Q370 B item 5: the staged entry's smallest row timestamp: the caller's when it read one, else read here. */
+    static long stagedMinTimestamp(List<SchemaV1Row> rows, boolean minRowTsRead, long minRowTs) {
+        return minRowTsRead ? minRowTs : SpoolFrameCodec.minTimestamp(rows);
+    }
+
+    /**
+     * {@link #stageOrRefusal(List, long, long)}; Q370 B item 5: when {@code minRowTsRead}, {@code minRowTs} is the
+     * rows' smallest timestamp, read by the caller before {@code writeLifecycleLock}; otherwise it is read here.
+     * Owner Q397 A: {@code diskBytes} is the rows' exact frame length ({@link SpoolFrameCodec#encodedLength}), worked
+     * out by the caller before {@code writeLifecycleLock}; under the lock it is only added and compared. Owner Q405 A
+     * (check-q397 MINOR-1): a negative {@code diskBytes} means "not counted" (the caller saw no spool before its lock);
+     * the length is then worked out here, before {@code stagingLock}, so no action is ever staged as 0 disk bytes.
+     */
+    String stageOrRefusal(List<SchemaV1Row> rows, long retainedBytes, long diskBytes, boolean minRowTsRead,
+                          long minRowTs, long capturedMillis) {
+        if (diskBytes < 0L) diskBytes = SpoolFrameCodec.encodedLength(rows);
+        Staged entry = new Staged(rows, retainedBytes, diskBytes, stagedMinTimestamp(rows, minRowTsRead, minRowTs),
+                capturedMillis);
         boolean firstUse;
         synchronized (stagingLock) {
-            if (staging.size() + 1 > STAGING_MAX_ACTIONS
-                    || stagedRetainedBytes.get() + retainedBytes > STAGING_MAX_RETAINED_BYTES) return false;
+            if (diskBytes > diskRoomLocked()) return REFUSED_DISK_FULL;
+            if (stagedRetainedBytes.get() + retainedBytes > handOffByteLimit()) return REFUSED_WAITING_ROOM;
+            if (staging.size() + 1 > stagingMaxActions) return REFUSED_WAITING_ROOM;
+            if (diskFullSeen) diskFullSeen = false;
+            if (waitingRoomFullSeen) waitingRoomFullSeen = false;
             firstUse = !latched();
             staging.addLast(entry);
             stagedActions.incrementAndGet();
             stagedRows.addAndGet(rows.size());
             stagedRetainedBytes.addAndGet(retainedBytes);
+            stagedDiskBytes.addAndGet(diskBytes);
             stagingLock.notifyAll();
         }
         spooledActions.incrementAndGet();
         spooledRows.addAndGet(rows.size());
         if (firstUse && !firstUseWarned) {
             firstUseWarned = true;
-            firstUseLinePending = true;
+            firstUseLinePending.set(true);
         }
-        return true;
+        return null;
     }
 
-    /** S2 (6.8): stages a group saved at stop; waits for staging room until {@code deadlineNanos}. */
+    /**
+     * S2 (6.8): stages a group saved at stop; waits for staging room until {@code deadlineNanos}. D-563, Owner Q397 A:
+     * room is the cap's disk room in exact disk bytes and the hand-off's memory limit (and the test seam), as for
+     * {@link #stage}; the disk bytes are worked out here, before the lock.
+     */
     boolean stageAtStop(List<SchemaV1Row> rows, long retainedBytes, long deadlineNanos) {
-        Staged entry = new Staged(rows, retainedBytes, SpoolFrameCodec.minTimestamp(rows), settings.clock().getAsLong());
+        long diskBytes = SpoolFrameCodec.encodedLength(rows);
+        Staged entry = new Staged(rows, retainedBytes, diskBytes, SpoolFrameCodec.minTimestamp(rows),
+                settings.clock().getAsLong());
         synchronized (stagingLock) {
             while (true) {
                 if (state != State.READY || damagedReason != null || abandoned || closeRequested) return false;
-                if (staging.size() + 1 <= STAGING_MAX_ACTIONS
-                        && stagedRetainedBytes.get() + retainedBytes <= STAGING_MAX_RETAINED_BYTES) break;
+                if (staging.size() + 1 <= stagingMaxActions && diskBytes <= diskRoomLocked()
+                        && stagedRetainedBytes.get() + retainedBytes <= handOffByteLimit()) break;
                 long waitNanos = deadlineNanos - System.nanoTime();
                 if (waitNanos <= 0) return false;
                 try {
@@ -708,6 +1097,7 @@ final class DiskSpool {
             stagedActions.incrementAndGet();
             stagedRows.addAndGet(rows.size());
             stagedRetainedBytes.addAndGet(retainedBytes);
+            stagedDiskBytes.addAndGet(diskBytes);
             stagingLock.notifyAll();
         }
         savedAtStopActions.incrementAndGet();
@@ -715,31 +1105,168 @@ final class DiskSpool {
         return true;
     }
 
-    private volatile boolean firstUseLinePending;
+    private final AtomicBoolean firstUseLinePending = new AtomicBoolean();
 
-    private volatile boolean fullLinePending;
+    private final AtomicBoolean fullLinePending = new AtomicBoolean();
 
-    /** Under the admission lock: notes (no logging) that the spool refused this action for room. */
-    void markFullIfFull(long retainedBytes) {
-        if (!fullWarned && "full".equals(refusal(retainedBytes))) {
-            fullWarned = true;
-            fullLinePending = true;
+    private final AtomicBoolean waitingRoomLinePending = new AtomicBoolean();
+
+    private final AtomicBoolean floorLinePending = new AtomicBoolean();
+
+    private static final int ROOM_DISK = 0;
+    private static final int ROOM_WAITING = 1;
+    private static final int ROOM_FLOOR = 2;
+
+    /**
+     * Under the admission lock: notes (no logging) that the disk part refused this action for room. D-563: given the
+     * refusal the caller already has, never a second {@link #refusal} read. Owner Q405 A: only the disk cap's own
+     * refusal ({@link #REFUSED_DISK_FULL}) is the disk-full case; the sequence limit is counted with it but does not
+     * write its WARN. Owner Q413 (a) A: the floor ({@link #REFUSED_FLOOR}) writes its own WARN ({@link #floorWarn}).
+     * A waiting-room refusal has its own ({@link #markWaitingRoomIfFull}).
+     */
+    void markFullIfFull(String reason) {
+        if (REFUSED_DISK_FULL.equals(reason)) noteRoomRefusal(ROOM_DISK);
+        else if (REFUSED_FLOOR.equals(reason)) noteRoomRefusal(ROOM_FLOOR);
+    }
+
+    /**
+     * Owner Q405 A, under the admission lock: notes (no logging) that the waiting room refused this action and it was
+     * dropped. Called only where the action is dropped and counted, so the WARN's "New actions are dropped" is true when
+     * it fires (an action the waiting room refused that memory still took is not dropped).
+     */
+    void markWaitingRoomIfFull(String reason) {
+        if (REFUSED_WAITING_ROOM.equals(reason)) noteRoomRefusal(ROOM_WAITING);
+    }
+
+    /**
+     * Under {@code stagingLock}. Q405 re-check MAJOR-A: the FULL flag (disk or waiting room; the floor has none) is set
+     * only while the spool holds something, so a drain that emptied it between the refusal and this note never leaves a
+     * FULL flag behind (the steps that give room back clear it under the same lock). Owner Q413 (b) A: an empty spool
+     * ends the last episode first ({@link #clearFullFlagsIfEmptyLocked}), so a refusal after it is a new episode; its
+     * WARN is queued unless this episode already wrote it, or the same WARN was written less than
+     * {@link #DROP_WARN_REARM_GAP_MILLIS} ago (a later refusal in the same episode then writes it once the gap is over).
+     */
+    private void noteRoomRefusal(int room) {
+        synchronized (stagingLock) {
+            clearFullFlagsIfEmptyLocked();
+            boolean holds = waitingFrames.get() != 0 || !staging.isEmpty();
+            long now = settings.clock().getAsLong();
+            switch (room) {
+                case ROOM_DISK -> {
+                    if (holds) diskFullSeen = true;
+                    if (!fullWarned && gapOver(fullWarnMillis, now)) {
+                        fullWarned = true;
+                        fullWarnMillis = now;
+                        fullLinePending.set(true);
+                    }
+                }
+                case ROOM_WAITING -> {
+                    // Check-q397 pass 3 MINOR-1: the waiting room's flag only while actions wait in it; a commit that
+                    // emptied it between the refusal and this note (frames still on disk) leaves no FULL behind.
+                    if (!staging.isEmpty()) waitingRoomFullSeen = true;
+                    if (!waitingRoomWarned && gapOver(waitingRoomWarnMillis, now)) {
+                        waitingRoomWarned = true;
+                        waitingRoomWarnMillis = now;
+                        waitingRoomLinePending.set(true);
+                    }
+                }
+                default -> {
+                    if (!floorWarned && gapOver(floorWarnMillis, now)) {
+                        floorWarned = true;
+                        floorWarnMillis = now;
+                        floorWarnUsableBytes = lastUsableBytes;
+                        floorLinePending.set(true);
+                    }
+                }
+            }
         }
     }
 
-    /** Writes the deferred first-use and full WARNs outside every lock (called after admission). */
+    /** Owner Q413 (b) A: never written, or written at least the gap ago (a clock that went back counts as over). */
+    private static boolean gapOver(long lastMillis, long now) {
+        return lastMillis == Long.MIN_VALUE || now < lastMillis || now - lastMillis >= DROP_WARN_REARM_GAP_MILLIS;
+    }
+
+    /**
+     * Writes the deferred first-use, disk-full, waiting-room and drive-low WARNs outside every lock (called after
+     * admission). Q405 re-check NIT-B: each pending flag is taken with getAndSet, so two producers flushing at once
+     * print it once.
+     */
     void flushAdmissionLines() {
-        if (firstUseLinePending) {
-            firstUseLinePending = false;
+        if (firstUseLinePending.getAndSet(false)) {
             LOGGER.warn("The database writer is full; new actions now wait on disk in the EventTrail spool and will be "
                     + "written when the database catches up.");
         }
-        if (fullLinePending) {
-            fullLinePending = false;
-            LOGGER.warn("EventTrail's disk spool is full ({} of {} MiB); new actions go to memory while it has room and "
-                            + "are refused and counted after that. See /eventtrail status.",
-                    (waitingBytes.get() + unreadableBytes.get()) / MIB, settings.capBytes() / MIB);
+        if (fullLinePending.getAndSet(false)) {
+            // Owner Q397 A: the cap test's own exact count, in the Owner's words: counted, the cap, on disk (waiting
+            // and unreadable), still being written (the hand-off's exact disk bytes). One consistent read.
+            long onDisk;
+            long beingWritten;
+            synchronized (stagingLock) {
+                onDisk = waitingBytes.get() + unreadableBytes.get();
+                beingWritten = stagedDiskBytes.get();
+            }
+            LOGGER.warn("{}", fullWarn(onDisk, beingWritten, settings.capBytes()));
         }
+        if (waitingRoomLinePending.getAndSet(false)) {
+            LOGGER.warn("{}", waitingRoomWarn(handOffByteLimit()));
+        }
+        if (floorLinePending.getAndSet(false)) {
+            LOGGER.warn("{}", floorWarn(floorWarnUsableBytes));
+        }
+    }
+
+    /**
+     * Owner Q397 A: the disk part's figures in MiB, in this order: counted (on disk plus still being written), the cap,
+     * on disk (waiting and unreadable), still being written (the hand-off's exact disk bytes). The disk-full WARN and
+     * the status line both use it, so their figures match (Owner Q405 A, check-q397 MINOR-2). Owner rule of 4:52 PM
+     * 11-25: the used figure (the "N" of "N of M MiB") is rounded down, as are the two parts after it; when the part
+     * shows FULL ({@code full}), N is its limit, so a full spool reads "512 of 512 MiB" ({@link #usedMib}).
+     */
+    static String diskFigures(long onDiskBytes, long beingWrittenBytes, long capBytes, boolean full) {
+        return usedMib(onDiskBytes + beingWrittenBytes, capBytes, full) + " of " + capBytes / MIB + " MiB: "
+                + onDiskBytes / MIB + " MiB on disk, " + beingWrittenBytes / MIB + " MiB still being written";
+    }
+
+    /**
+     * Owner rule of 4:52 PM 11-25: a part's used figure in whole MiB, rounded down; a part shown FULL prints its limit.
+     * D-655 (check-q397 pass 3 MINOR-6 (ii)): when the counted bytes are above the limit (a carried-in spool file after
+     * the limit was lowered between restarts; SpoolFile keeps it whole), FULL prints the larger of the two, so the
+     * parts after it never add up to more than N.
+     */
+    static long usedMib(long usedBytes, long limitBytes, boolean full) {
+        long down = usedBytes / MIB;
+        return full ? Math.max(limitBytes / MIB, down) : down;
+    }
+
+    /**
+     * Owner Q413 (a) A: the drive-low WARN, in the Owner's OK'd words; its figure is the drive's measured free space,
+     * rounded down, so it never reads as the floor itself.
+     */
+    static String floorWarn(long usableBytes) {
+        return "EventTrail's disk spool has stopped taking new actions because the drive it is on has less than "
+                + FLOOR_BYTES / MIB + " MiB free (" + Math.max(0L, usableBytes) / MIB + " MiB free). New actions are"
+                + " held in memory while there is room, then dropped and counted. See /eventtrail status.";
+    }
+
+    /**
+     * Owner Q397 A: the full WARN, in the Owner's words, with its figures ({@link #diskFigures}). Owner Q405 A: written
+     * only for the disk cap's own refusal.
+     */
+    static String fullWarn(long onDiskBytes, long beingWrittenBytes, long capBytes) {
+        return "EventTrail's disk spool is full (" + diskFigures(onDiskBytes, beingWrittenBytes, capBytes, true)
+                + "). New actions are held in memory while there is room, then dropped and counted."
+                + " See /eventtrail status.";
+    }
+
+    /**
+     * Owner Q405 A: the waiting-room WARN, in the Owner's words byte for byte; its one figure is the waiting room's
+     * memory limit in MiB ({@link #handOffByteLimit}), the same figure the status line shows.
+     */
+    static String waitingRoomWarn(long waitingRoomBytes) {
+        return "EventTrail is receiving actions faster than it can write them to disk, and the " + waitingRoomBytes / MIB
+                + " MiB of memory set aside for them is full. New actions are dropped and counted until it catches up."
+                + " See /eventtrail status.";
     }
 
     // ---- the spool thread (design-02 4.4) -------------------------------------------------------------------
@@ -751,8 +1278,11 @@ final class DiskSpool {
     private void loop() {
         while (true) {
             synchronized (stagingLock) {
-                while (staging.isEmpty() && tasks.isEmpty() && unreadableMarks.isEmpty() && !closeRequested
-                        && !deleteDue() && !shrinkDue) {
+                // No-drop item 2: while the position check waits (not settled), staged actions stay staged: a frame
+                // committed before the check settles would be counted as carried in (markSettled), so the spool
+                // thread waits for the settle (markSettled wakes it) or the close (which commits them).
+                while ((staging.isEmpty() || !positionSettled) && tasks.isEmpty() && unreadableMarks.isEmpty()
+                        && !closeRequested && !deleteDue() && !shrinkDue) {
                     try {
                         stagingLock.wait(belowFloor ? FLOOR_PROBE_MILLIS : 1_000L);
                     } catch (InterruptedException interrupted) {
@@ -763,7 +1293,7 @@ final class DiskSpool {
             }
             runTasks();
             if (belowFloor && settings.clock().getAsLong() >= nextFloorProbeMillis) probeFloor();
-            if (!staging.isEmpty()) commitBatch();
+            if (!staging.isEmpty() && positionSettled) commitBatch();
             applyMarks();
             applyDelete();
             if (shrinkDue) shrinkNow();
@@ -791,15 +1321,23 @@ final class DiskSpool {
         } catch (RuntimeException unavailable) {
             usable = Long.MAX_VALUE;
         }
+        lastUsableBytes = usable;
         belowFloor = usable < FLOOR_BYTES;
         nextFloorProbeMillis = settings.clock().getAsLong() + FLOOR_PROBE_MILLIS;
     }
 
-    /** design-02 4.4 steps 2 to 6. */
+    /**
+     * design-02 4.4 steps 2 to 6. No-drop item 2: at most {@link #COMMIT_CHUNK_ACTIONS} staged actions per
+     * transaction, oldest first, so hand-off room comes back after each chunk rather than after the whole backlog.
+     */
     private void commitBatch() {
         List<Staged> batch;
         synchronized (stagingLock) {
-            batch = new ArrayList<>(staging);
+            batch = new ArrayList<>(Math.min(staging.size(), COMMIT_CHUNK_ACTIONS));
+            for (Staged entry : staging) {
+                if (batch.size() >= COMMIT_CHUNK_ACTIONS) break;
+                batch.add(entry);
+            }
         }
         if (batch.isEmpty()) return;
         if (damagedReason != null) {
@@ -855,26 +1393,59 @@ final class DiskSpool {
             return;
         }
         boolean wasEmpty = waitingFrames.get() == 0;
-        removeStaged(batch);
-        if (codecFailed > 0) countCouldNotStore(codecFailed, codecFailedRows, "encode-failed", AFTER_CONTINUES);
-        long rows = rowsOf(stored);
-        committedThisRunRows.addAndGet(rows);
-        refreshMirrors();
-        publishedHighWater.set(newHigh);
+        committedThisRunRows.addAndGet(rowsOf(stored));
         if (wasEmpty && !stored.isEmpty()) oldestAppendedMillis = appendedAt;
+        // Q383 A (the Q379 double count): the chunk moves from staged to waiting in ONE step under stagingLock: the
+        // waiting mirrors, the published high-water and the staged decrements. The cap test (refusal,
+        // handOffFreeBytes, stageOrRefusal) reads under the same lock, so it never sees the chunk counted both as
+        // waiting and as staged; before Q383 that moment answered a spurious "full" (an action then overtook the
+        // waiting ones by row 4, or was dropped with memory full). Waiting still moves before staged, and latched()
+        // reads staged first, so the lock-free latch never reads 0 across the step. No I/O here: refreshMirrors reads
+        // the file's in-memory meta (SpoolFile.meta() returns a field); the insert above has already committed.
+        synchronized (stagingLock) {
+            refreshMirrors();
+            publishedHighWater.set(newHigh);
+            Runnable between = betweenCommitMirrorsForTest;
+            if (between != null) between.run();
+            removeStagedLocked(batch, false);
+        }
+        if (codecFailed > 0) countCouldNotStore(codecFailed, codecFailedRows, "encode-failed", AFTER_CONTINUES);
     }
 
+    /**
+     * Check finding (B), Q383 A test seam: runs on the spool thread inside the commit's one {@code stagingLock} step,
+     * after the mirror update and before the staged entries leave (null in production). Other threads cannot read the
+     * mirrors' cap test until the step ends.
+     */
+    volatile Runnable betweenCommitMirrorsForTest;
+
+    /** A drop: the batch leaves staging without reaching the file, so both parts get room back. */
     private void removeStaged(List<Staged> batch) {
         synchronized (stagingLock) {
-            for (int i = 0; i < batch.size(); i++) {
-                Staged head = staging.pollFirst();
-                if (head != batch.get(i)) throw new IllegalStateException("EventTrail spool staging has a second consumer");
-                stagedActions.decrementAndGet();
-                stagedRows.addAndGet(-head.rows().size());
-                stagedRetainedBytes.addAndGet(-head.retainedBytes());
-            }
-            stagingLock.notifyAll();
+            removeStagedLocked(batch, true);
         }
+    }
+
+    /**
+     * Under {@code stagingLock}: the batch, the oldest staged entries, leaves staging; no I/O. Q405 re-check MAJOR-A:
+     * the waiting room always gets room back here, so its FULL flag ends; the disk part only when {@code freedDisk} (a
+     * drop; a commit moves the bytes to the file, no room back); both end when the spool is empty.
+     */
+    private void removeStagedLocked(List<Staged> batch, boolean freedDisk) {
+        for (int i = 0; i < batch.size(); i++) {
+            Staged head = staging.pollFirst();
+            if (head != batch.get(i)) throw new IllegalStateException("EventTrail spool staging has a second consumer");
+            stagedActions.decrementAndGet();
+            stagedRows.addAndGet(-head.rows().size());
+            stagedRetainedBytes.addAndGet(-head.retainedBytes());
+            stagedDiskBytes.addAndGet(-head.diskBytes());
+        }
+        if (!batch.isEmpty()) {
+            waitingRoomFullSeen = false;
+            if (freedDisk) diskFullSeen = false;
+        }
+        clearFullFlagsIfEmptyLocked();
+        stagingLock.notifyAll();
     }
 
     private void dropStaged(List<Staged> batch, String reason) {
@@ -1011,16 +1582,41 @@ final class DiskSpool {
         }
     }
 
+    /**
+     * Spool thread. Q383 A: under {@code stagingLock} (a leaf; re-entered from the commit step), so the cap test reads
+     * waiting and unreadable as one set. No I/O: the meta is the file's in-memory copy.
+     */
     private void refreshMirrors() {
         SpoolFile f = file;
         if (f == null) return;
         SpoolFile.Meta meta = f.meta();
-        waitingFrames.set(meta.waitingFrames());
-        waitingRows.set(meta.waitingRows());
-        waitingBytes.set(meta.waitingBytes());
-        unreadableFrames.set(meta.unreadableFrames());
-        unreadableRows.set(meta.unreadableRows());
-        unreadableBytes.set(meta.unreadableBytes());
+        synchronized (stagingLock) {
+            long onDiskBefore = waitingBytes.get() + unreadableBytes.get();
+            waitingFrames.set(meta.waitingFrames());
+            waitingRows.set(meta.waitingRows());
+            waitingBytes.set(meta.waitingBytes());
+            unreadableFrames.set(meta.unreadableFrames());
+            unreadableRows.set(meta.unreadableRows());
+            unreadableBytes.set(meta.unreadableBytes());
+            // Q405 re-check MAJOR-A: a delete gave the disk part room back, so its FULL flag ends here.
+            if (meta.waitingBytes() + meta.unreadableBytes() < onDiskBefore) diskFullSeen = false;
+            clearFullFlagsIfEmptyLocked();
+        }
+    }
+
+    /**
+     * Q405 re-check MAJOR-A, under {@code stagingLock}: nothing waits and nothing is staged, so neither part is full;
+     * both FULL flags end (a later action goes straight to memory and would never reach the stage that clears them).
+     * Owner Q413 (b) A: the spool is empty again, so each drop WARN re-arms for the next episode.
+     */
+    private void clearFullFlagsIfEmptyLocked() {
+        if (waitingFrames.get() == 0 && staging.isEmpty()) {
+            diskFullSeen = false;
+            waitingRoomFullSeen = false;
+            fullWarned = false;
+            waitingRoomWarned = false;
+            floorWarned = false;
+        }
     }
 
     /** Status only: "oldest" is the time since the spool last became non-empty (an upper bound). */
@@ -1174,8 +1770,12 @@ final class DiskSpool {
 
     /** On the spool thread: commit all staging, delete through X, shrink if empty, clean mark, close, release. */
     private void closeOnSpoolThread() {
+        // No-drop item 2: commits are chunked, so the bound covers a full hand-off in chunks, plus the old 64 rounds.
+        // D-563: the hand-off has no fixed size now, so the rounds follow what is staged at the close (nothing is
+        // staged after the close is requested: stage is refused and stageAtStop gives up).
+        int rounds = closeCommitRounds(stagedActions.get());
         int guard = 0;
-        while (!staging.isEmpty() && damagedReason == null && guard++ < 64) commitBatch();
+        while (!staging.isEmpty() && damagedReason == null && guard++ < rounds) commitBatch();
         if (!staging.isEmpty()) {
             List<Staged> rest;
             synchronized (stagingLock) { rest = new ArrayList<>(staging); }
@@ -1267,7 +1867,112 @@ final class DiskSpool {
                       long positionBehindLostActions, long asideSets, long asideBytes, long asideActions,
                       long asideUnknownSets, long heldSets, long heldActions, long heldUnknownSets,
                       long savedAtStopActions,
-                      long waitingThisRunRows, long unresolvedThisRunRows, long disabledWaiting) {}
+                      long waitingThisRunRows, long unresolvedThisRunRows, long disabledWaiting,
+                      long stagedRetainedBytes, long refusedBehindRows, long handOffByteLimit,
+                      long unreadableBytes, long stagedDiskBytes, boolean diskFullSeen, boolean waitingRoomFullSeen,
+                      long refusedFloorRows) {
+        /** The shape before Owner Q413 (a) A: no "drive low on space" drops. */
+        SpoolStats(State state, String offReason, String damagedReason, String replayStoppedReason,
+                   boolean replayPaused, boolean settled, long storePauseRemainingSeconds, String storeFailureReason,
+                   long capBytes, long waitingFrames, long waitingRows, long waitingBytes, long oldestSeconds,
+                   long stagedActions, long stagedRows, long spooledRows, long writtenFromSpoolRows,
+                   long carriedInActions, long carriedInWrittenActions, long carriedInWrittenRows,
+                   long refusedFullRows, long refusedUnwritableRows, long refusedOffRows, long admittedPastActions,
+                   long couldNotStoreActions, long couldNotStoreRows, long unreadableActions,
+                   long unreadableRowsAsStored, long expiredActions, long expiredRows, long skippedActions,
+                   long positionBehindLostActions, long asideSets, long asideBytes, long asideActions,
+                   long asideUnknownSets, long heldSets, long heldActions, long heldUnknownSets,
+                   long savedAtStopActions,
+                   long waitingThisRunRows, long unresolvedThisRunRows, long disabledWaiting,
+                   long stagedRetainedBytes, long refusedBehindRows, long handOffByteLimit,
+                   long unreadableBytes, long stagedDiskBytes, boolean diskFullSeen, boolean waitingRoomFullSeen) {
+            this(state, offReason, damagedReason, replayStoppedReason, replayPaused, settled, storePauseRemainingSeconds,
+                    storeFailureReason, capBytes, waitingFrames, waitingRows, waitingBytes, oldestSeconds, stagedActions,
+                    stagedRows, spooledRows, writtenFromSpoolRows, carriedInActions, carriedInWrittenActions,
+                    carriedInWrittenRows, refusedFullRows, refusedUnwritableRows, refusedOffRows, admittedPastActions,
+                    couldNotStoreActions, couldNotStoreRows, unreadableActions, unreadableRowsAsStored, expiredActions,
+                    expiredRows, skippedActions, positionBehindLostActions, asideSets, asideBytes, asideActions,
+                    asideUnknownSets, heldSets, heldActions, heldUnknownSets, savedAtStopActions, waitingThisRunRows,
+                    unresolvedThisRunRows, disabledWaiting, stagedRetainedBytes, refusedBehindRows, handOffByteLimit,
+                    unreadableBytes, stagedDiskBytes, diskFullSeen, waitingRoomFullSeen, 0L);
+        }
+
+        /**
+         * The shape before Owner Q405 A: no unreadable or staged disk bytes, and no refusal seen (the status then reads
+         * FULL from the figures alone).
+         */
+        SpoolStats(State state, String offReason, String damagedReason, String replayStoppedReason,
+                   boolean replayPaused, boolean settled, long storePauseRemainingSeconds, String storeFailureReason,
+                   long capBytes, long waitingFrames, long waitingRows, long waitingBytes, long oldestSeconds,
+                   long stagedActions, long stagedRows, long spooledRows, long writtenFromSpoolRows,
+                   long carriedInActions, long carriedInWrittenActions, long carriedInWrittenRows,
+                   long refusedFullRows, long refusedUnwritableRows, long refusedOffRows, long admittedPastActions,
+                   long couldNotStoreActions, long couldNotStoreRows, long unreadableActions,
+                   long unreadableRowsAsStored, long expiredActions, long expiredRows, long skippedActions,
+                   long positionBehindLostActions, long asideSets, long asideBytes, long asideActions,
+                   long asideUnknownSets, long heldSets, long heldActions, long heldUnknownSets,
+                   long savedAtStopActions,
+                   long waitingThisRunRows, long unresolvedThisRunRows, long disabledWaiting,
+                   long stagedRetainedBytes, long refusedBehindRows, long handOffByteLimit) {
+            this(state, offReason, damagedReason, replayStoppedReason, replayPaused, settled, storePauseRemainingSeconds,
+                    storeFailureReason, capBytes, waitingFrames, waitingRows, waitingBytes, oldestSeconds, stagedActions,
+                    stagedRows, spooledRows, writtenFromSpoolRows, carriedInActions, carriedInWrittenActions,
+                    carriedInWrittenRows, refusedFullRows, refusedUnwritableRows, refusedOffRows, admittedPastActions,
+                    couldNotStoreActions, couldNotStoreRows, unreadableActions, unreadableRowsAsStored, expiredActions,
+                    expiredRows, skippedActions, positionBehindLostActions, asideSets, asideBytes, asideActions,
+                    asideUnknownSets, heldSets, heldActions, heldUnknownSets, savedAtStopActions, waitingThisRunRows,
+                    unresolvedThisRunRows, disabledWaiting, stagedRetainedBytes, refusedBehindRows, handOffByteLimit,
+                    0L, 0L, false, false);
+        }
+
+        /** The shape before D-563: the hand-off's byte limit read as the cap's, with nothing waiting on disk. */
+        SpoolStats(State state, String offReason, String damagedReason, String replayStoppedReason,
+                   boolean replayPaused, boolean settled, long storePauseRemainingSeconds, String storeFailureReason,
+                   long capBytes, long waitingFrames, long waitingRows, long waitingBytes, long oldestSeconds,
+                   long stagedActions, long stagedRows, long spooledRows, long writtenFromSpoolRows,
+                   long carriedInActions, long carriedInWrittenActions, long carriedInWrittenRows,
+                   long refusedFullRows, long refusedUnwritableRows, long refusedOffRows, long admittedPastActions,
+                   long couldNotStoreActions, long couldNotStoreRows, long unreadableActions,
+                   long unreadableRowsAsStored, long expiredActions, long expiredRows, long skippedActions,
+                   long positionBehindLostActions, long asideSets, long asideBytes, long asideActions,
+                   long asideUnknownSets, long heldSets, long heldActions, long heldUnknownSets,
+                   long savedAtStopActions,
+                   long waitingThisRunRows, long unresolvedThisRunRows, long disabledWaiting,
+                   long stagedRetainedBytes, long refusedBehindRows) {
+            this(state, offReason, damagedReason, replayStoppedReason, replayPaused, settled, storePauseRemainingSeconds,
+                    storeFailureReason, capBytes, waitingFrames, waitingRows, waitingBytes, oldestSeconds, stagedActions,
+                    stagedRows, spooledRows, writtenFromSpoolRows, carriedInActions, carriedInWrittenActions,
+                    carriedInWrittenRows, refusedFullRows, refusedUnwritableRows, refusedOffRows, admittedPastActions,
+                    couldNotStoreActions, couldNotStoreRows, unreadableActions, unreadableRowsAsStored, expiredActions,
+                    expiredRows, skippedActions, positionBehindLostActions, asideSets, asideBytes, asideActions,
+                    asideUnknownSets, heldSets, heldActions, heldUnknownSets, savedAtStopActions, waitingThisRunRows,
+                    unresolvedThisRunRows, disabledWaiting, stagedRetainedBytes, refusedBehindRows,
+                    handOffMaxBytes(capBytes));
+        }
+
+        /** The shape before no-drop item 2: an empty hand-off byte count and no "behind" drops. */
+        SpoolStats(State state, String offReason, String damagedReason, String replayStoppedReason,
+                   boolean replayPaused, boolean settled, long storePauseRemainingSeconds, String storeFailureReason,
+                   long capBytes, long waitingFrames, long waitingRows, long waitingBytes, long oldestSeconds,
+                   long stagedActions, long stagedRows, long spooledRows, long writtenFromSpoolRows,
+                   long carriedInActions, long carriedInWrittenActions, long carriedInWrittenRows,
+                   long refusedFullRows, long refusedUnwritableRows, long refusedOffRows, long admittedPastActions,
+                   long couldNotStoreActions, long couldNotStoreRows, long unreadableActions,
+                   long unreadableRowsAsStored, long expiredActions, long expiredRows, long skippedActions,
+                   long positionBehindLostActions, long asideSets, long asideBytes, long asideActions,
+                   long asideUnknownSets, long heldSets, long heldActions, long heldUnknownSets,
+                   long savedAtStopActions,
+                   long waitingThisRunRows, long unresolvedThisRunRows, long disabledWaiting) {
+            this(state, offReason, damagedReason, replayStoppedReason, replayPaused, settled, storePauseRemainingSeconds,
+                    storeFailureReason, capBytes, waitingFrames, waitingRows, waitingBytes, oldestSeconds, stagedActions,
+                    stagedRows, spooledRows, writtenFromSpoolRows, carriedInActions, carriedInWrittenActions,
+                    carriedInWrittenRows, refusedFullRows, refusedUnwritableRows, refusedOffRows, admittedPastActions,
+                    couldNotStoreActions, couldNotStoreRows, unreadableActions, unreadableRowsAsStored, expiredActions,
+                    expiredRows, skippedActions, positionBehindLostActions, asideSets, asideBytes, asideActions,
+                    asideUnknownSets, heldSets, heldActions, heldUnknownSets, savedAtStopActions, waitingThisRunRows,
+                    unresolvedThisRunRows, disabledWaiting, 0L, 0L, handOffMaxBytes(capBytes));
+        }
+    }
 
     volatile long disabledWaiting;
 
@@ -1277,17 +1982,41 @@ final class DiskSpool {
         long committed = committedThisRunRows.get();
         long resolvedThisRun = writtenFromSpoolRows.get() + unreadableThisRunRows.get() + expiredThisRunRows.get()
                 + poisonThisRunRows.get();
+        // Owner Q405 A (check-q397 MINOR-2): the disk part's figures and the waiting room's, read in one stagingLock
+        // hold, as the disk-full WARN reads them, so the status shows the same counted figure.
+        long waitingNow;
+        long unreadableNow;
+        long stagedDiskNow;
+        long stagedActionsNow;
+        long stagedRetainedNow;
+        long waitingFramesNow;
+        boolean diskFullNow;
+        boolean waitingRoomFullNow;
+        synchronized (stagingLock) {
+            waitingNow = waitingBytes.get();
+            unreadableNow = unreadableBytes.get();
+            stagedDiskNow = stagedDiskBytes.get();
+            stagedActionsNow = stagedActions.get();
+            stagedRetainedNow = stagedRetainedBytes.get();
+            // Q405 re-check NIT-C: the waiting count in the same hold, so a committing chunk is never counted twice;
+            // MAJOR-A: the FULL flags too, so they agree with the figures beside them.
+            waitingFramesNow = waitingFrames.get();
+            diskFullNow = diskFullSeen;
+            waitingRoomFullNow = waitingRoomFullSeen;
+        }
         return new SpoolStats(state, offReason, damagedReason, replayStoppedReason, replayPaused, positionSettled,
                 Math.max(0L, (storePauseUntilMillis - now + 999L) / 1000L), storeFailureReason, settings.capBytes(),
-                waitingFrames.get(), waitingRows.get(), waitingBytes.get(),
-                oldest < 0 ? -1L : Math.max(0L, (now - oldest) / 1000L), stagedActions.get(), stagedRows.get(),
+                waitingFramesNow, waitingRows.get(), waitingNow,
+                oldest < 0 ? -1L : Math.max(0L, (now - oldest) / 1000L), stagedActionsNow, stagedRows.get(),
                 spooledRows.get(), writtenFromSpoolRows.get(), carriedInActions.get(), carriedInWrittenActions.get(),
                 carriedInWrittenRows.get(), refusedFullRows.get(), refusedUnwritableRows.get(), refusedOffRows.get(),
                 admittedPastActions.get(), couldNotStoreActions.get(), couldNotStoreRows.get(), unreadableActions.get(),
                 unreadableRowsAsStored.get(), expiredActions.get(), expiredRows.get(), skippedPastPositionActions.get(),
                 positionBehindLostActions.get(), asideSets, asideBytes, asideActions, asideUnknownSets, heldSets,
                 heldActions, heldUnknownSets, savedAtStopActions.get(), Math.max(0L, committed - resolvedThisRun),
-                unreadableThisRunRows.get() + expiredThisRunRows.get(), disabledWaiting);
+                unreadableThisRunRows.get() + expiredThisRunRows.get(), disabledWaiting, stagedRetainedNow,
+                refusedBehindRows.get(), handOffByteLimit(), unreadableNow, stagedDiskNow, diskFullNow,
+                waitingRoomFullNow, refusedFloorRows.get());
     }
 
     /** design-02 11.2, the texts as written (no colour codes; the command adds them). */
@@ -1317,28 +2046,68 @@ final class DiskSpool {
                             + count(s.waitingFrames()) + " actions stay on disk for the next start");
                 } else if (s.replayPaused() || !s.settled()) {
                     lines.add("Disk spool: paused - the database position row is locked; " + count(s.waitingFrames())
-                            + " actions wait, new actions use memory");
+                            + " actions wait, new actions wait "
+                            // NIT-3 (own check 1): a paused replay still writes new actions to disk; while the
+                            // position check waits they stay in the in-memory hand-off, then go to memory.
+                            + (s.settled() ? "on disk behind them"
+                            : "behind them (in the hand-off to disk, then in memory)"));
                 } else if (s.storePauseRemainingSeconds() > 0) {
                     lines.add("Disk spool: not accepting for " + s.storePauseRemainingSeconds()
                             + "s (could not store: " + s.storeFailureReason() + ")");
-                } else if (s.waitingBytes() >= s.capBytes()) {
-                    lines.add("Disk spool: FULL (" + (s.waitingBytes() / MIB) + " of " + limit
-                            + " MiB) - new actions go to memory while it has room, else are refused");
-                } else if (s.waitingFrames() + s.stagedActions() == 0) {
+                } else if (diskPartFull(s)) {
+                    // Owner Q405 A (check-q397 MINOR-2): the disk-full WARN's own figures (diskFigures), counted the
+                    // same way, so the two match. Owner Q412 A: the wording of owner-texts-q405.md item c.
+                    lines.add("Disk spool: FULL (" + diskFigures(onDisk(s), s.stagedDiskBytes(), s.capBytes(), true)
+                            + ") - new actions are held in memory while there is room, then dropped and counted");
+                } else if (s.waitingFrames() + s.stagedActions() == 0 && s.unreadableBytes() == 0L) {
                     lines.add("Disk spool: ready, empty (limit " + limit + " MiB)");
                 } else {
                     lines.add("Disk spool: in use - " + count(s.waitingFrames() + s.stagedActions())
-                            + " actions waiting on disk (" + (s.waitingBytes() / MIB) + " MiB of " + limit + " MiB)"
+                            + " actions waiting (" + diskFigures(onDisk(s), s.stagedDiskBytes(), s.capBytes(), false)
+                            + ")"
                             + (s.oldestSeconds() >= 0 ? ", oldest " + s.oldestSeconds() + "s" : ""));
                 }
             }
         }
+        boolean waitingRoomFull = waitingRoomFull(s);
+        if (s.state() == State.READY && (s.stagedActions() > 0 || waitingRoomFull)) {
+            // No-drop item 2: the in-memory hand-off to the disk, shown apart from the memory queue and the disk.
+            // Owner Q405 A: the waiting room, used / its memory limit (the figure the waiting-room WARN names); the
+            // action count has no bound. Owner rule of 4:52 PM 11-25: the used figure rounded down; FULL prints the
+            // limit, so a full room reads "416 of 416" (usedMib).
+            String figures = usedMib(s.stagedRetainedBytes(), s.handOffByteLimit(), waitingRoomFull) + " of "
+                    + (s.handOffByteLimit() / MIB) + " MiB, "
+                    + count(s.stagedActions()) + " actions";
+            lines.add(waitingRoomFull
+                    ? "Memory for actions waiting to be written to disk: FULL (" + figures
+                            + ") - new actions are dropped and counted until the disk catches up"
+                    : "Memory for actions waiting to be written to disk: " + figures);
+        }
         lines.add("Spooled / written from the spool since startup: " + count(s.spooledRows()) + " / "
                 + count(s.writtenFromSpoolRows() + s.carriedInWrittenRows()) + " rows; carried over from an earlier run: "
                 + count(s.carriedInActions()) + " actions");
-        if (s.refusedFullRows() + s.refusedUnwritableRows() + s.refusedOffRows() > 0) {
-            lines.add("Refused while the spool was full / unwritable / off: " + count(s.refusedFullRows()) + " / "
-                    + count(s.refusedUnwritableRows()) + " / " + count(s.refusedOffRows()) + " rows");
+        if (s.refusedFullRows() + s.refusedBehindRows() + s.refusedFloorRows() + s.refusedUnwritableRows()
+                + s.refusedOffRows() > 0) {
+            // Owner Q405 A: the waiting room's drops ("behind"), named only when not 0. Owner Q413 (a) A: the floor's
+            // drops ("drive low on space") likewise, after it.
+            List<String> names = new ArrayList<>();
+            List<String> figures = new ArrayList<>();
+            names.add("disk spool full");
+            figures.add(count(s.refusedFullRows()));
+            if (s.refusedBehindRows() > 0) {
+                names.add("waiting memory full");
+                figures.add(count(s.refusedBehindRows()));
+            }
+            if (s.refusedFloorRows() > 0) {
+                names.add("drive low on space");
+                figures.add(count(s.refusedFloorRows()));
+            }
+            names.add("spool unwritable");
+            figures.add(count(s.refusedUnwritableRows()));
+            names.add("spool off");
+            figures.add(count(s.refusedOffRows()));
+            lines.add("Dropped (not stored): " + String.join(" / ", names) + ": " + String.join(" / ", figures)
+                    + " rows");
         }
         if (s.admittedPastActions() > 0) lines.add("Admitted past the spool: " + count(s.admittedPastActions()) + " actions");
         if (s.couldNotStoreActions() > 0) {
@@ -1374,6 +2143,44 @@ final class DiskSpool {
                     + ") in spool/held");
         }
         return List.copyOf(lines);
+    }
+
+    /** The disk part's bytes on disk: waiting and unreadable (Owner Q397 A). */
+    private static long onDisk(SpoolStats s) {
+        return s.waitingBytes() + s.unreadableBytes();
+    }
+
+    /**
+     * Owner Q405 A (check-q397 MINOR-2): the disk part is full when the last room refusal counted was the disk's, or
+     * when not even the smallest action's frame ({@link SpoolFrameCodec#ROW_FIXED_BYTES}) fits the counted figure.
+     */
+    static boolean diskPartFull(SpoolStats s) {
+        return s.diskFullSeen()
+                || onDisk(s) + s.stagedDiskBytes() + SpoolFrameCodec.ROW_FIXED_BYTES > s.capBytes();
+    }
+
+    /**
+     * Owner Q405 A: the waiting room is full when the last room refusal counted was the waiting room's, or when not even
+     * the smallest action ({@link #MIN_ACTION_RETAINED_BYTES}) fits its memory limit.
+     */
+    static boolean waitingRoomFull(SpoolStats s) {
+        return s.waitingRoomFullSeen()
+                || s.stagedRetainedBytes() + MIN_ACTION_RETAINED_BYTES > s.handOffByteLimit();
+    }
+
+    /**
+     * Owner Q405 A: the status lines with, right after the first line, the line saying the waiting room was lowered at
+     * startup and why, so admins who do not read logs see it. Without a lowering, the lines of
+     * {@link #statusLines(SpoolStats)}.
+     */
+    static List<String> statusLines(SpoolStats s, Settings settings) {
+        List<String> lines = statusLines(s);
+        // A disabled spool uses no memory, so nothing was lowered for it.
+        String lowered = settings == null || s.state() == State.DISABLED ? null : waitingRoomLoweredStatusLine(settings);
+        if (lowered == null) return lines;
+        List<String> withLowered = new ArrayList<>(lines);
+        withLowered.add(Math.min(1, withLowered.size()), lowered);
+        return List.copyOf(withLowered);
     }
 
     static String count(long value) {

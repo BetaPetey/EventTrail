@@ -429,7 +429,7 @@ public final class ExtendedLookup {
                     + " §8(" + stats.pendingPayloadBytes() + " estimated payload bytes)");
             lines.add("§7Discarded without commit confirmation: §f"
                     + (stats.permanentFailed() + stats.shutdownLost()));
-            lines.add("§7Rejected before admission: §f" + (stats.rejectedFull() + stats.rejectedPayload()
+            lines.add("§7Dropped before admission (not stored): §f" + (stats.rejectedFull() + stats.rejectedPayload()
                     + stats.rejectedOversized() + stats.rejectedClosed()));
             lines.add("§7Uncertain outcomes may still have database rows; discard is not proof of absence.");
         }

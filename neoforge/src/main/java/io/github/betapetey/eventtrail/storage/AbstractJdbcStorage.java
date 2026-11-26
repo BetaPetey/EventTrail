@@ -347,8 +347,15 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
         return EventTrailJdbcLogScope.wrap(namedFactory);
     }
 
+    /** NIT-6 (own check 1) test seam: how many hand-off classes the last {@link #init} preloaded; -1 before any. */
+    static volatile int preloadedAtInitForTest = -1;
+
     @Override
     public final void init() throws Exception {
+        // Q370 B: the hand-off path's classes load here, once, not on the first game-thread calls (or under the lock).
+        int preloaded = HandOffClassPreload.preload(AbstractJdbcStorage.class.getClassLoader(), LOGGER::debug);
+        preloadedAtInitForTest = preloaded;
+        LOGGER.debug("EventTrail preloaded {} of {} hand-off classes", preloaded, HandOffClassPreload.CLASSES.size());
         try (EventTrailJdbcLogScope.Scope ignored = EventTrailJdbcLogScope.open()) {
             initScoped();
         }
@@ -1481,6 +1488,39 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
     }
 
     /**
+     * Q370 B timing seam, tests only: told, on the calling thread, when {@link #tryLogAll} reaches each point below,
+     * so a test can split a slow hand-off call into its steps (encoding, the wait for {@code writeLifecycleLock}, the
+     * time it is held and the spool staging and queue offer inside it, the lines after it, and the second lock in
+     * {@link #publishWriteObservation}). Production never sets it: no configuration key and no command reach it, so
+     * each call reads one null field and does nothing else.
+     */
+    interface AdmissionTiming {
+        int START = 0;
+        int ENCODED = 1;
+        int LOCKED = 2;
+        int STAGE_BEGIN = 3;
+        int STAGE_END = 4;
+        int OFFER_BEGIN = 5;
+        int OFFER_END = 6;
+        int UNLOCKED = 7;
+        int PUBLISH_BEGIN = 8;
+        int END = 9;
+        int POINTS = 10;
+
+        void at(int point);
+    }
+
+    /** Q370 B seam: null in production; set and cleared only by tests. */
+    static volatile AdmissionTiming admissionTimingForTest;
+
+    /**
+     * Q405 re-check MINOR-C seam for {@link #tryLogAllWhenRoom}: {@code START} after its first lock (before the
+     * encode) and {@code ENCODED} after the disk bytes are worked out. Null in production; its own field, so the Q370 B
+     * timing tests of tryLogAll see no extra points.
+     */
+    static volatile AdmissionTiming whenRoomTimingForTest;
+
+    /**
      * Admits every row of one action to the write queue, or none (writer-01 2.5; adapter design-r3 3.3 B). Every
      * row is encoded first; one malformed row rejects the group. Under {@code writeLifecycleLock}: the open check,
      * every row within the single-entry limit, the group within {@link #MAX_ROWS_PER_ACTION} rows and within the
@@ -1493,6 +1533,8 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
     @Override
     public final boolean tryLogAll(List<AuditRecord> records) {
         if (records == null || records.isEmpty()) return false;
+        AdmissionTiming timing = admissionTimingForTest;
+        if (timing != null) timing.at(AdmissionTiming.START);
         refreshBackendRestriction();
 
         int rowCount = records.size();
@@ -1512,11 +1554,24 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             groupBytes = saturatedAdd(groupBytes, rowBytes);
             rows.add(row);
         }
+        // Q370 B item 5: the work that grows with rows is done before writeLifecycleLock. List.copyOf of this
+        // immutable copy returns it, so PendingGroup's own copy under the lock is O(1); the spool's smallest row
+        // timestamp is read once here (it depends on the rows only) when a spool is set.
+        List<SchemaV1Row> frozen = List.copyOf(rows);
+        boolean minRowTsRead = spool != null;
+        long minRowTs = minRowTsRead ? SpoolFrameCodec.minTimestamp(frozen) : 0L;
+        // Owner Q397 A: the action's exact disk bytes for the spool's cap test (its frame length), worked out here,
+        // before writeLifecycleLock: one pass over the rows' chars, no allocation. Only when a spool is set. Owner
+        // Q405 A (check-q397 MINOR-1): -1 means "not counted"; if a spool is set by the time the lock is held (the
+        // startup race), the length is worked out under it (spoolStageLocked), never taken as 0.
+        long diskBytes = minRowTsRead ? SpoolFrameCodec.encodedLength(frozen) : -1L;
+        if (timing != null) timing.at(AdmissionTiming.ENCODED);
 
         WritePressureReason pressure = null;
         DiskSpool spoolLines = null;
         try {
         synchronized (writeLifecycleLock) {
+            if (timing != null) timing.at(AdmissionTiming.LOCKED);
             if (!acceptingWrites) {
                 rejectedClosedWrites.addAndGet(rowCount);
                 return false;
@@ -1542,20 +1597,31 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             // staged behind them when the spool can take it; no SQLite call and no file I/O here (S-4).
             DiskSpool diskSpool = spool;
             boolean latched = diskSpool != null && spoolLatchedLocked(diskSpool);
-            if (latched && spoolStageLocked(diskSpool, rows, groupBytes)) {
-                spoolLines = diskSpool;
-                return true;
-            }
-            // Built before any permit is taken, so a constructor failure cannot leak permits (review-01 NIT-5).
-            PendingGroup pending = new PendingGroup(rows, groupBytes, latched);
-            if (!pendingWriteSlots.tryAcquire(rowCount)) {
-                // design-02 4.3: memory has no room; the spool may start an episode instead of refusing.
-                if (!latched && diskSpool != null && spoolStageLocked(diskSpool, rows, groupBytes)) {
+            // D-563 (the B2 mislabel): the spool's answer for this action, read once; a refusal is counted from it.
+            String spoolRefusal = null;
+            if (latched) {
+                spoolRefusal = spoolStageLocked(diskSpool, frozen, groupBytes, diskBytes, minRowTsRead, minRowTs,
+                        timing);
+                if (spoolRefusal == null) {
                     spoolLines = diskSpool;
                     return true;
                 }
+            }
+            // Built before any permit is taken, so a constructor failure cannot leak permits (review-01 NIT-5).
+            // Item 5: `frozen` is already an immutable copy, so this copies nothing under the lock.
+            PendingGroup pending = new PendingGroup(frozen, groupBytes, latched);
+            if (!pendingWriteSlots.tryAcquire(rowCount)) {
+                // design-02 4.3: memory has no room; the spool may start an episode instead of refusing.
+                if (!latched && diskSpool != null) {
+                    spoolRefusal = spoolStageLocked(diskSpool, frozen, groupBytes, diskBytes, minRowTsRead, minRowTs,
+                            timing);
+                    if (spoolRefusal == null) {
+                        spoolLines = diskSpool;
+                        return true;
+                    }
+                }
                 rejectedFullWrites.addAndGet(rowCount);
-                spoolLines = countSpoolRefusalLocked(diskSpool, groupBytes, rowCount);
+                spoolLines = countSpoolRefusalLocked(diskSpool, spoolRefusal, rowCount);
                 pressure = WritePressureReason.COUNT_CAPACITY;
                 return false;
             }
@@ -1564,12 +1630,16 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             long payloadLimit = maxPendingPayloadBytes();
             if (groupBytes > payloadLimit - currentPayload) {
                 pendingWriteSlots.release(rowCount);
-                if (!latched && diskSpool != null && spoolStageLocked(diskSpool, rows, groupBytes)) {
-                    spoolLines = diskSpool;
-                    return true;
+                if (!latched && diskSpool != null) {
+                    spoolRefusal = spoolStageLocked(diskSpool, frozen, groupBytes, diskBytes, minRowTsRead, minRowTs,
+                            timing);
+                    if (spoolRefusal == null) {
+                        spoolLines = diskSpool;
+                        return true;
+                    }
                 }
                 rejectedPayloadWrites.addAndGet(rowCount);
-                spoolLines = countSpoolRefusalLocked(diskSpool, groupBytes, rowCount);
+                spoolLines = countSpoolRefusalLocked(diskSpool, spoolRefusal, rowCount);
                 pressure = WritePressureReason.PAYLOAD_CAPACITY;
                 return false;
             }
@@ -1580,11 +1650,14 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             // design-02 4.3 row 4: the spool could not take it while actions wait, memory could (the order exception).
             if (latched) {
                 diskSpool.admittedPastActions.incrementAndGet();
-                diskSpool.markFullIfFull(groupBytes);
+                diskSpool.markFullIfFull(spoolRefusal);
                 spoolLines = diskSpool;
                 pendingAdmittedPastGroups.incrementAndGet();
             }
-            if (!offerPendingWrite(pending)) {
+            if (timing != null) timing.at(AdmissionTiming.OFFER_BEGIN);
+            boolean offered = offerPendingWrite(pending);
+            if (timing != null) timing.at(AdmissionTiming.OFFER_END);
+            if (!offered) {
                 // The row permits bound the element count below the queue's capacity. This path is
                 // defensive in case their state ever becomes inconsistent: the group is rejected whole.
                 if (latched) pendingAdmittedPastGroups.decrementAndGet();
@@ -1599,11 +1672,34 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
             return true;
         }
         } finally {
+            if (timing != null) timing.at(AdmissionTiming.UNLOCKED);
             // Do not call listeners or logging while admission/accounting is locked.
             try {
                 if (spoolLines != null) spoolLines.flushAdmissionLines();
                 if (pressure != null) logWritePressure(pressure);
-            } finally { publishWriteObservation(); }
+                if (pressure == WritePressureReason.COUNT_CAPACITY || pressure == WritePressureReason.PAYLOAD_CAPACITY) {
+                    warnDropsIfDue(false);
+                }
+            } finally {
+                if (timing != null) timing.at(AdmissionTiming.PUBLISH_BEGIN);
+                publishWriteObservation();
+                if (timing != null) timing.at(AdmissionTiming.END);
+            }
+        }
+    }
+
+    /**
+     * {@link #spoolStageLocked(DiskSpool, List, long, long, boolean, long)} with the Q370 B seam's two points around
+     * it.
+     */
+    private String spoolStageLocked(DiskSpool diskSpool, List<SchemaV1Row> rows, long groupBytes, long diskBytes,
+                                    boolean minRowTsRead, long minRowTs, AdmissionTiming timing) {
+        if (timing == null) return spoolStageLocked(diskSpool, rows, groupBytes, diskBytes, minRowTsRead, minRowTs);
+        timing.at(AdmissionTiming.STAGE_BEGIN);
+        try {
+            return spoolStageLocked(diskSpool, rows, groupBytes, diskBytes, minRowTsRead, minRowTs);
+        } finally {
+            timing.at(AdmissionTiming.STAGE_END);
         }
     }
 
@@ -1619,33 +1715,66 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
         }
     }
 
-    /** Under writeLifecycleLock: decided from the atomic mirrors, then a pointer move into staging (design-02 4.3). */
-    private boolean spoolStageLocked(DiskSpool diskSpool, List<SchemaV1Row> rows, long groupBytes) {
+    /**
+     * Under writeLifecycleLock: decided from the spool's mirrors, read under its leaf stagingLock (Q383 A; no I/O),
+     * then a pointer move into staging (design-02 4.3).
+     * Returns null when staged, else the spool's reason, read once (D-563: the refusal is counted from this answer,
+     * never from a second read). A Throwable from spool code turns the spool off, so its reason is "off".
+     */
+    private String spoolStageLocked(DiskSpool diskSpool, List<SchemaV1Row> rows, long groupBytes, long diskBytes) {
+        return spoolStageLocked(diskSpool, rows, groupBytes, diskBytes, false, 0L);
+    }
+
+    /**
+     * {@link #spoolStageLocked(DiskSpool, List, long, long)}; Q370 B item 5: when {@code minRowTsRead},
+     * {@code minRowTs} is the rows' smallest timestamp, read before writeLifecycleLock, so the spool does not scan the
+     * rows under it. Owner Q397 A: {@code diskBytes} is the rows' exact frame length, worked out before
+     * writeLifecycleLock too ({@link SpoolFrameCodec#encodedLength}); the cap test counts it. Owner Q405 A
+     * (check-q397 MINOR-1): a negative {@code diskBytes} is "not counted" (no spool was set before the lock); it is
+     * worked out here, under writeLifecycleLock and before the cap test, so the startup race cannot let an action pass
+     * the cap as 0 bytes.
+     */
+    private String spoolStageLocked(DiskSpool diskSpool, List<SchemaV1Row> rows, long groupBytes, long diskBytes,
+                                    boolean minRowTsRead, long minRowTs) {
         try {
-            if (!diskSpool.canAccept(groupBytes)) return false;
-            if (!diskSpool.stage(rows, groupBytes, System.currentTimeMillis())) return false;
+            if (diskBytes < 0L) diskBytes = SpoolFrameCodec.encodedLength(rows);
+            String reason = diskSpool.refusal(groupBytes, diskBytes);
+            if (reason != null) return reason;
+            reason = diskSpool.stageOrRefusal(rows, groupBytes, diskBytes, minRowTsRead, minRowTs,
+                    System.currentTimeMillis());
+            if (reason != null) return reason;
             acceptedWrites.addAndGet(rows.size());
-            return true;
+            return null;
         } catch (VirtualMachineError fatal) {
             throw fatal;
         } catch (Throwable failure) {
             diskSpool.failInAdmission(failure);
-            return false;
+            return "off";
         }
     }
 
     /**
      * Under writeLifecycleLock: the refused rows are already in today's counter; the spool's reason is a breakdown
-     * of those same rows, never added on top (design-01 11). Returns the spool when it has a line to write.
+     * of those same rows, never added on top (design-01 11). Returns the spool when it has a line to write. D-563
+     * (the B2 mislabel): {@code reason} is the answer the spool gave when this action was offered to it; the spool is
+     * not asked again, so room that came back in between can no longer turn a refusal into "off". An action never
+     * offered to the spool (none here) has no reason and counts as "off".
      */
-    private DiskSpool countSpoolRefusalLocked(DiskSpool diskSpool, long groupBytes, int rowCount) {
+    private DiskSpool countSpoolRefusalLocked(DiskSpool diskSpool, String reason, int rowCount) {
         if (diskSpool == null) return null;
         try {
-            String reason = diskSpool.refusal(groupBytes);
+            // The Owner's rule (Q413 A, 4:03 PM 11-25): "Actions are dropped only when the disk spool is full, when the
+            // drive it is on has less than 512 MiB free, or when they arrive faster than the disk can take them for
+            // long enough to fill the memory set aside for them. Each case has its own WARN." The disk cap and the
+            // sequence limit are counted as "disk spool full", the floor as "drive low on space", the waiting room
+            // ("behind") as "waiting memory full"; the cap, the floor and the waiting room each note their own WARN.
             if (reason == null || "off".equals(reason)) diskSpool.refusedOffRows.addAndGet(rowCount);
-            else if ("full".equals(reason)) diskSpool.refusedFullRows.addAndGet(rowCount);
+            else if (DiskSpool.REFUSED_FLOOR.equals(reason)) diskSpool.refusedFloorRows.addAndGet(rowCount);
+            else if (DiskSpool.countsAsDiskFull(reason)) diskSpool.refusedFullRows.addAndGet(rowCount);
+            else if (DiskSpool.REFUSED_WAITING_ROOM.equals(reason)) diskSpool.refusedBehindRows.addAndGet(rowCount);
             else diskSpool.refusedUnwritableRows.addAndGet(rowCount);
-            diskSpool.markFullIfFull(groupBytes);
+            diskSpool.markFullIfFull(reason);
+            diskSpool.markWaitingRoomIfFull(reason);
             return diskSpool;
         } catch (VirtualMachineError fatal) {
             throw fatal;
@@ -1687,11 +1816,22 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
         }
         refreshBackendRestriction();
         int rowCount = records.size();
+        DiskSpool spoolLines = null;
         try {
             synchronized (writeLifecycleLock) {
                 OfferResult early = whenRoomLocked(rowCount, retainedBytes, headroomRows, headroomBytes);
-                if (early != null) return early;
+                // No-drop item 2 (Owner Q330 A, the explosion backlog): a part memory has no room for may still go to
+                // the disk spool, so it is encoded when the spool could take it.
+                // Owner Q397 A: before encoding the part's disk bytes are not known; this early test counts none (it
+                // only asks whether the disk is already full), and the test after encoding counts them exactly.
+                if (early == OfferResult.NO_ROOM
+                        && !spoolPartRoomLocked(spool, retainedBytes, 0L, headroomRows, headroomBytes)) {
+                    return early;
+                }
+                if (early == OfferResult.REFUSED) return early;
             }
+            AdmissionTiming timing = whenRoomTimingForTest;
+            if (timing != null) timing.at(AdmissionTiming.START);
             List<SchemaV1Row> rows = new ArrayList<>(rowCount);
             long largestRowBytes = 0L;
             long groupBytes = 0L;
@@ -1708,15 +1848,33 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 groupBytes = saturatedAdd(groupBytes, rowBytes);
                 rows.add(row);
             }
+            // Owner Q397 A: the part's exact disk bytes (its frame length), before writeLifecycleLock; only when a
+            // spool is set. Owner Q405 A (check-q397 MINOR-1): -1 is "not counted", worked out under the lock below if
+            // a spool is set by then.
+            long diskBytes = spool != null ? SpoolFrameCodec.encodedLength(rows) : -1L;
+            if (timing != null) timing.at(AdmissionTiming.ENCODED);
             synchronized (writeLifecycleLock) {
                 if (largestRowBytes > maxSingleEntryRetainedBytes()) return OfferResult.REFUSED;
                 // Re-tested with the encoded size: another producer may have taken room since the first test.
                 OfferResult now = whenRoomLocked(rowCount, groupBytes, headroomRows, headroomBytes);
+                if (now == OfferResult.REFUSED) return now;
+                DiskSpool diskSpool = spool;
+                boolean latched = diskSpool != null && spoolLatchedLocked(diskSpool);
+                if (diskBytes < 0L && diskSpool != null && (latched || now == OfferResult.NO_ROOM)) {
+                    diskBytes = SpoolFrameCodec.encodedLength(rows);
+                }
+                // No-drop item 2 (Owner Q330 A, the explosion backlog): while actions wait on disk the part waits
+                // behind them, as any action does; with nothing waiting it goes to disk only when memory has no room
+                // for it plus the headroom. The disk hand-off keeps the same headroom free for other actions.
+                if ((latched || now == OfferResult.NO_ROOM)
+                        && spoolPartRoomLocked(diskSpool, groupBytes, diskBytes, headroomRows, headroomBytes)
+                        && spoolStageLocked(diskSpool, rows, groupBytes, diskBytes) == null) {
+                    spoolLines = diskSpool;
+                    return OfferResult.ADMITTED;
+                }
                 if (now != null) return now;
                 // MAJOR-1 / MINOR-9: a part admitted to memory while actions wait on disk overtakes them (S3, M-7,
                 // decides its spool path); it counts toward the starvation bound like the exception row.
-                DiskSpool diskSpool = spool;
-                boolean latched = diskSpool != null && spoolLatchedLocked(diskSpool);
                 PendingGroup pending = new PendingGroup(rows, groupBytes, latched);
                 if (!pendingWriteSlots.tryAcquire(rowCount)) return OfferResult.NO_ROOM;
                 pendingPayloadBytes.addAndGet(groupBytes);
@@ -1735,7 +1893,32 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 return OfferResult.ADMITTED;
             }
         } finally {
-            publishWriteObservation();
+            try {
+                if (spoolLines != null) spoolLines.flushAdmissionLines();
+            } finally { publishWriteObservation(); }
+        }
+    }
+
+    /**
+     * Under writeLifecycleLock (no-drop item 2): could the disk spool take an explosion part of {@code bytes} and still
+     * leave the part's headroom free in the disk hand-off ({@code headroomRows} actions and {@code headroomBytes})?
+     * The spool's mirrors, read under its leaf stagingLock (Q383 A; no I/O). A part never takes the hand-off's last
+     * room, so other actions still find it. Owner Q397 A: {@code diskBytes} is the part's exact disk bytes; the
+     * headroom is kept free on both sides, the hand-off's memory ({@code bytes}, retained) and the disk's room.
+     */
+    private boolean spoolPartRoomLocked(DiskSpool diskSpool, long bytes, long diskBytes, int headroomRows,
+                                        long headroomBytes) {
+        if (diskSpool == null) return false;
+        try {
+            return diskSpool.refusal(bytes, diskBytes) == null
+                    && diskSpool.handOffFreeActions() - 1L >= headroomRows
+                    && diskSpool.handOffFreeBytes() - bytes >= headroomBytes
+                    && diskSpool.diskFreeBytes() - diskBytes >= headroomBytes;
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable failure) {
+            diskSpool.failInAdmission(failure);
+            return false;
         }
     }
 
@@ -1773,7 +1956,8 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
     public final boolean hasWriteCapacityHint() {
         refreshBackendRestriction();
         synchronized (writeLifecycleLock) {
-            // L8 / design-01 2.2: spool-aware; the spool's part is atomic mirrors only (no I/O).
+            // L8 / design-01 2.2: spool-aware; the spool's part reads its mirrors under the leaf stagingLock (Q383 A;
+            // no I/O), read only when memory's own hint says no.
             return acceptingWrites && (hasBufferCapacityHintLocked() || spoolHintLocked());
         }
     }
@@ -1831,7 +2015,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
     /** Status lines of design-02 11.2 (plain text); empty without a spool. */
     public final List<String> spoolStatusLines() {
         DiskSpool diskSpool = spool;
-        return diskSpool == null ? List.of() : DiskSpool.statusLines(diskSpool.stats());
+        return diskSpool == null ? List.of() : DiskSpool.statusLines(diskSpool.stats(), diskSpool.settings());
     }
 
     /** Actions waiting on disk or in staging (the "Audit logging: Backlogged" line, design-01 11); 0 without a spool. */
@@ -2014,8 +2198,8 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 // M-2 step 2: replay paused; the writer retries the check every 30 s; init never fails for it.
                 spoolSettleRetryNotBeforeNanos = System.nanoTime() + SPOOL_SETTLE_RETRY_NANOS;
                 created.markReadyUnsettled();
-                LOGGER.warn("EventTrail disk spool: the database position row is locked; replay is paused and new "
-                        + "actions use memory until the check succeeds.");
+                LOGGER.warn("EventTrail disk spool: the database position row is locked; replay is paused until the "
+                        + "check succeeds. New actions use memory, and wait on disk when memory is full.");
                 return;
             }
             if (isConnectionFailure(failure) && !isDefiniteRowRefusal(failure)) throw failure;
@@ -2321,38 +2505,70 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
 
     /**
      * design-02 11.1, the not-closed-cleanly WARN, with the true most a crash, kill or power loss loses on every
-     * backend alike (r8): the spool's staging ({@link DiskSpool#STAGING_MAX_ACTIONS} actions and
-     * {@link DiskSpool#STAGING_MAX_RETAINED_BYTES}, the batch being inserted included) and the writer's memory
+     * backend alike (r8): the spool's staging (the batch being inserted included) and the writer's memory
      * ({@link #WRITE_BUFFER_CAPACITY} rows and {@link #MAX_PENDING_PAYLOAD_BYTES}, held until each group resolves).
-     * Every action in memory has at least one row, so the two together are at most 8,192 actions (64 MiB). R-12 (r9):
-     * that bound is for actions the database writer accepted; explosion parts still in the explosion part publisher's
-     * backlog ({@code ExplosionSplitLimits.BACKLOG_MAX_ROWS} rows, {@code BACKLOG_MAX_BYTES}) had not reached it.
+     * Every action in memory has at least one row, so the two together are at most {@link #crashWindowActions}
+     * actions ({@link #crashWindowMib} MiB). D-563, Owner Q405 A: the hand-off's figures are the waiting room's memory
+     * limit ({@link DiskSpool#handOffMaxBytes}, {@link DiskSpool#handOffMaxActions}: that limit, and that over the
+     * least bytes an action carries), and the WARN is built from it. R-12 (r9): that bound is
+     * for actions the database writer accepted; explosion parts still in the explosion part publisher's backlog
+     * ({@code ExplosionSplitLimits.BACKLOG_MAX_ROWS} rows, {@code BACKLOG_MAX_BYTES}) had not reached it.
      */
-    static final String SPOOL_NOT_CLOSED_CLEANLY_WARN = "EventTrail disk spool was not closed cleanly (crash, kill or "
-            + "power loss). Every action it had stored on disk is kept and will be written. Actions the database "
-            + "writer had accepted before the stop that had reached neither the disk nor the database are lost and "
-            + "cannot be counted: at most 4,096 actions (32 MiB by the writer's estimate) waiting to be stored on disk, "
-            + "plus at most 4,096 rows (32 MiB) in the database writer's memory; at most 8,192 actions (64 MiB) in "
-            + "all. Explosion parts still waiting in the explosion part backlog (at most 32,768 rows, 96 MiB) had not "
-            + "reached the database writer; they are lost too and cannot be counted.";
+    static long crashWindowActions(long waitingRoomBytes) {
+        return DiskSpool.handOffMaxActions(waitingRoomBytes) + WRITE_BUFFER_CAPACITY;
+    }
+
+    static long crashWindowMib(long waitingRoomBytes) {
+        return (DiskSpool.handOffMaxBytes(waitingRoomBytes) + MAX_PENDING_PAYLOAD_BYTES) / (1024L * 1024L);
+    }
+
+    /**
+     * Owner Q405 A: callers pass the waiting room's memory limit in this run as {@code waitingRoomBytes}
+     * ({@link DiskSpool.Settings#waitingRoomBytes}, the whole cap unless the startup check lowered it), the bound on
+     * what the hand-off holds; before Q405 it was the cap, when the two were the same. The WAL-missing WARN takes the
+     * same figure.
+     */
+    static String spoolNotClosedCleanlyWarn(long waitingRoomBytes) {
+        return "EventTrail disk spool was not closed cleanly (crash, kill or "
+                + "power loss). Every action it had stored on disk is kept and will be written. Actions the database "
+                + "writer had accepted before the stop that had reached neither the disk nor the database are lost and "
+                + "cannot be counted: at most "
+                + String.format(java.util.Locale.ROOT, "%,d", DiskSpool.handOffMaxActions(waitingRoomBytes))
+                + " actions (" + DiskSpool.handOffMaxBytes(waitingRoomBytes) / (1024L * 1024L)
+                + " MiB by the writer's estimate)"
+                + " waiting to be stored on disk, plus at most "
+                + String.format(java.util.Locale.ROOT, "%,d", WRITE_BUFFER_CAPACITY) + " rows ("
+                + MAX_PENDING_PAYLOAD_BYTES / (1024L * 1024L) + " MiB) in the database writer's memory; at most "
+                + String.format(java.util.Locale.ROOT, "%,d", crashWindowActions(waitingRoomBytes)) + " actions ("
+                + crashWindowMib(waitingRoomBytes) + " MiB) in all. Explosion parts still waiting in the explosion part backlog"
+                + " (at most 32,768 rows, 96 MiB) had not reached the database writer; they are lost too and cannot be"
+                + " counted.";
+    }
 
     /**
      * design-02 11.1, the WAL-missing variant, with R-12 (r9): another program that opened spool.db after the stop
      * folds the WAL into the file (then nothing stored is missing), and the crash window sentence of
-     * {@link #SPOOL_NOT_CLOSED_CLEANLY_WARN} applies as well.
+     * {@link #spoolNotClosedCleanlyWarn} applies as well.
      */
-    static final String SPOOL_WAL_MISSING_WARN = "EventTrail disk spool was not closed cleanly (crash, kill or power "
-            + "loss); its WAL file is missing, so actions stored since its last checkpoint may be lost (count "
-            + "unknown). If another program opened spool.db after the stop, it folded the WAL into the file and "
-            + "nothing stored is missing. Actions the database writer had accepted before the stop that had reached "
-            + "neither the disk nor the database are lost and cannot be counted: at most 8,192 actions (64 MiB) in "
-            + "all, plus explosion parts still waiting in the explosion part backlog.";
+    static String spoolWalMissingWarn(long waitingRoomBytes) {
+        return "EventTrail disk spool was not closed cleanly (crash, kill or power "
+                + "loss); its WAL file is missing, so actions stored since its last checkpoint may be lost (count "
+                + "unknown). If another program opened spool.db after the stop, it folded the WAL into the file and "
+                + "nothing stored is missing. Actions the database writer had accepted before the stop that had reached "
+                + "neither the disk nor the database are lost and cannot be counted: at most "
+                + String.format(java.util.Locale.ROOT, "%,d", crashWindowActions(waitingRoomBytes)) + " actions ("
+                + crashWindowMib(waitingRoomBytes) + " MiB) in all, plus explosion parts still waiting in the explosion part "
+                + "backlog.";
+    }
 
     /**
      * design-02 11.1 with MAJOR-3 (r2): the open lines, each once per start, logged right after the open and before
      * the position check, so a paused or refused check never loses them. The "ready" line follows a settled check.
      */
     private void logSpoolOpenLines(DiskSpool diskSpool, DiskSpool.OpenOutcome outcome) {
+        // Owner Q405 A: the waiting room, when the startup memory check lowered it, and how to raise it.
+        String lowered = DiskSpool.waitingRoomLoweredWarn(diskSpool.settings());
+        if (lowered != null) LOGGER.warn(lowered);
         for (SpoolFile.MovedSet moved : outcome.movedNow()) {
             if (!SpoolFile.ASIDE.equals(moved.kind())) continue;
             SpoolFile.Meta m = moved.metaOrNull();
@@ -2368,9 +2584,9 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                         + "stopped early). Every action it had stored on disk is kept and will be written; the actions "
                         + "it could not store were counted in that run.");
             } else if (outcome.walMissing()) {
-                LOGGER.warn(SPOOL_WAL_MISSING_WARN);
+                LOGGER.warn(spoolWalMissingWarn(diskSpool.settings().waitingRoomBytes()));
             } else {
-                LOGGER.warn(SPOOL_NOT_CLOSED_CLEANLY_WARN);
+                LOGGER.warn(spoolNotClosedCleanlyWarn(diskSpool.settings().waitingRoomBytes()));
             }
         }
         if (diskSpool.asideSets > 0) {
@@ -2463,10 +2679,10 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
 
     /**
      * Writer thread, each loop: the paused-check retry (30 s), the NORMAL checkpoint gate (5 s), the paused-replay
-     * retry (5 s). Returns true when a spool unit is due. Never throws.
+     * retry (5 s). Returns true when a spool unit is due. Never throws. Q405 re-check NIT-E: the caller passes the
+     * spool it read once, so this never reads a second, different value of the field.
      */
-    private boolean spoolWriterHousekeeping() {
-        DiskSpool diskSpool = spool;
+    private boolean spoolWriterHousekeeping(DiskSpool diskSpool) {
         try {
             if (diskSpool.state() != DiskSpool.State.READY) return false;
             long now = System.nanoTime();
@@ -2609,8 +2825,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
     }
 
     /** Returns false only when the writer must stop (deadline, forced stop, identified ownership refusal). */
-    private boolean replaySpoolUnit() {
-        DiskSpool diskSpool = spool;
+    private boolean replaySpoolUnit(DiskSpool diskSpool) {
         SpoolUnit unit;
         try {
             unit = nextSpoolUnit(diskSpool);
@@ -2991,11 +3206,13 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 // No storage/native/cancellation lock is held while publishing below.
                 if (refreshBackendRestriction() != null) break;
                 // design-02 5.2 / L6: at stop the writer replays memory, then the spool, until the deadline.
-                boolean spoolDue = spool != null && spoolWriterHousekeeping();
+                DiskSpool loopSpool = spool;
+                boolean spoolDue = loopSpool != null && spoolWriterHousekeeping(loopSpool);
                 if (writeShutdownRequested && pendingWrites.get() == 0 && !spoolDue && !spoolStagedAwaitingCommit()) break;
                 if (shutdownDeadlineExpired()) break;
                 // af-1 F7: drops held back by the rate limit are reported once their interval has passed.
                 flushDroppedBatchLog(false);
+                warnDropsIfDue(false);
 
                 // design-01 7.1: memory first (it holds the older actions). Only while the group at the head of the
                 // memory queue was admitted past waiting frames (the exception row, MAJOR-1; N-3, r3: the queue is
@@ -3006,7 +3223,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                         && headGroupAdmittedPast()
                         && memoryUnitsWhileSpoolWaits >= SPOOL_STARVATION_MEMORY_UNITS))) {
                     memoryUnitsWhileSpoolWaits = 0;
-                    if (!replaySpoolUnit()) break;
+                    if (!replaySpoolUnit(loopSpool)) break;
                     continue;
                 }
 
@@ -3065,6 +3282,7 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                 int lost = saveOrDiscardPendingAtShutdown(activeBatch);
                 // af-1 F7: no drop of this run stays unreported when the writer ends (outside the rate limit).
                 flushDroppedBatchLog(true);
+                warnDropsIfDue(true);
                 if (terminalFailure != null) {
                     logUnexpectedStorageFailure("run the database writer", terminalFailure);
                 }
@@ -5123,6 +5341,93 @@ public abstract class AbstractJdbcStorage implements AdvancedLogStorage {
                     "EventTrail database connectivity succeeded for {} storage after {}s; this does not establish recording recovery.",
                     getBackendName(), Math.max(1L, outageDurationMs / 1000L));
         }
+    }
+
+    /**
+     * No-drop item 2 (Owner, 10:00 AM 11-24: "a WARN about once a minute"): rows dropped for lack of room (the memory
+     * queue's count and payload refusals, which the spool's breakdown splits by cause) get one WARN at most every
+     * {@value #DROP_WARN_INTERVAL_MILLIS} ms, carrying the rows since the last line and the totals by cause. The first
+     * drop of a run is reported at once; rows not yet reported are flushed by the writer loop once the interval has
+     * passed, and when the writer ends. Logged outside every storage lock.
+     */
+    static final long DROP_WARN_INTERVAL_MILLIS = 60_000L;
+    private final Object dropWarnLock = new Object();
+    private boolean dropWarnWritten;
+    private long dropWarnLastMillis;
+    private long dropWarnReportedRows;
+    /** The spool's breakdown (full, unwritable, off, behind, floor) at the last WARN, to name the new rows' causes. */
+    private final long[] dropWarnReportedCauses = new long[5];
+
+    final void warnDropsIfDue(boolean force) {
+        long total = rejectedFullWrites.get() + rejectedPayloadWrites.get();
+        long since;
+        long[] causes;
+        long[] newSince;
+        synchronized (dropWarnLock) {
+            since = total - dropWarnReportedRows;
+            if (since <= 0L) return;
+            long now = diagnosticNowMillis();
+            // A wall clock that stepped back counts as due once; the new time then starts the next interval.
+            boolean due = force || !dropWarnWritten || now < dropWarnLastMillis
+                    || now - dropWarnLastMillis >= DROP_WARN_INTERVAL_MILLIS;
+            if (!due) return;
+            dropWarnWritten = true;
+            dropWarnLastMillis = now;
+            dropWarnReportedRows = total;
+            // The spool's breakdown of the same rows, read under this lock (a leaf; the counters are atomics), so the
+            // causes since the last WARN are split between two callers, never named twice.
+            DiskSpool diskSpool = spool;
+            causes = diskSpool == null ? null : new long[] {diskSpool.refusedFullRows.get(),
+                    diskSpool.refusedUnwritableRows.get(), diskSpool.refusedOffRows.get(),
+                    diskSpool.refusedBehindRows.get(), diskSpool.refusedFloorRows.get()};
+            newSince = new long[5];
+            if (causes != null) {
+                for (int i = 0; i < causes.length; i++) {
+                    newSince[i] = Math.max(0L, causes[i] - dropWarnReportedCauses[i]);
+                    dropWarnReportedCauses[i] = Math.max(dropWarnReportedCauses[i], causes[i]);
+                }
+            }
+        }
+        LOGGER.warn("EventTrail dropped {} (not stored) since its last report, {} since startup, because {}. "
+                + "By cause since startup: {}. See /eventtrail status.",
+                auditRows(since), total, dropReason(causes, newSince), dropBreakdown(causes, total));
+    }
+
+    /** "1 audit row" / "2 audit rows": the WARN's count in plain words. */
+    static String auditRows(long rows) {
+        return rows + (rows == 1L ? " audit row" : " audit rows");
+    }
+
+    /**
+     * MINOR-4 (own check 1): the real cause of the rows dropped since the last WARN, from the spool's breakdown of
+     * those same rows: the spool off, the spool unwritable, or memory and the spool both full. With no spool at all,
+     * memory was full and nothing else could take them.
+     */
+    static String dropReason(long[] causes, long[] newSince) {
+        if (causes == null) return "memory was full and the disk spool is not in use";
+        List<String> reasons = new ArrayList<>(5);
+        if (newSince[0] > 0L) reasons.add("memory and the disk spool were both full");
+        if (newSince[1] > 0L) reasons.add("memory was full and the disk spool could not be written");
+        if (newSince[2] > 0L) reasons.add("memory was full and the disk spool was off");
+        // Owner Q412 A: the waiting room's cause in the plainer form, in the waiting-room WARN's words.
+        if (newSince[3] > 0L) reasons.add("the memory set aside for actions waiting to be written to disk was full");
+        // Owner Q413 (a) A: the drive's free-space floor, its own cause.
+        if (newSince[4] > 0L) {
+            reasons.add("memory was full and the drive had less than " + DiskSpool.FLOOR_BYTES / (1024L * 1024L)
+                    + " MiB free");
+        }
+        return reasons.isEmpty() ? "memory was full" : String.join("; and ", reasons);
+    }
+
+    /**
+     * The since-startup breakdown, in the order {full, unwritable, off, behind, floor}; "waiting memory full" (Owner
+     * Q405 A: the waiting room) and "drive low on space" (Owner Q413 (a) A: the floor) are named only when not 0.
+     */
+    static String dropBreakdown(long[] causes, long total) {
+        if (causes == null) return "memory full " + total;
+        return "disk spool full " + causes[0] + ", spool unwritable " + causes[1] + ", spool off " + causes[2]
+                + (causes[3] > 0L ? ", waiting memory full " + causes[3] : "")
+                + (causes[4] > 0L ? ", drive low on space " + causes[4] : "");
     }
 
     private void logWritePressure(WritePressureReason reason) {

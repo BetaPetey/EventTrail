@@ -398,6 +398,20 @@ public final class EventTrailConfigFormatter {
                 writer.newLine();
             }
 
+            // Owner Q412 A (owner-texts-q405.md item d) and the Owner's drop rule (Q413 A, 4:03 PM 11-25).
+            case "database.spool.maxMegabytes" -> {
+                writer.write("# Size of the disk spool, in MiB (64 to 65536), counted as the bytes of the stored actions.");
+                writer.newLine();
+                writer.write("# The spool's files on disk can be about 17% larger than that.");
+                writer.newLine();
+                writer.write("# Actions are dropped only when the disk spool is full, when the drive it is on has less than");
+                writer.newLine();
+                writer.write("# 512 MiB free, or when they arrive faster than the disk can take them for long enough to fill");
+                writer.newLine();
+                writer.write("# the memory set aside for them. Each case has its own WARN.");
+                writer.newLine();
+            }
+
             case "database.sqlite.synchronous" -> {
                 writer.write("# FULL (default) strengthens committed-transaction durability under SQLite's storage assumptions.");
                 writer.newLine();

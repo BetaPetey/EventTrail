@@ -170,8 +170,11 @@ file.
 Accepted entries wait briefly in a bounded in-memory queue before they are written. When the database cannot
 take them yet, EventTrail keeps them in a disk spool under the world folder (`eventtrail/spool/`) and writes them
 later, after a restart too. The spool is on by default (`database.spool.enabled`; its size cap is
-`database.spool.maxMegabytes`). Entries that had reached neither the spool nor the database when the server stops
-abruptly can be lost.
+`database.spool.maxMegabytes`). Actions are dropped only when the disk spool is full, when the drive it is on has
+less than 512 MiB free, or when they arrive faster than the disk can take them for long enough to fill the memory set
+aside for them. Each case has its own WARN. On a server with little memory, the memory set aside is lowered at
+startup with a WARN; the disk spool keeps its configured size. Entries that had reached neither the spool nor the
+database when the server stops abruptly can be lost.
 
 ### When recording stops
 

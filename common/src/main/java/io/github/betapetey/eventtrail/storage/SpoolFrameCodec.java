@@ -116,6 +116,56 @@ final class SpoolFrameCodec {
         return out.array();
     }
 
+    /**
+     * Owner Q397 A: the exact byte length {@link #encode} gives these rows (the payload the spool counts as waiting on
+     * disk), worked out without encoding: one pass over each string's chars, no allocation. Used for the cap test
+     * ("full"), so a staged action counts exactly the disk bytes it will take once committed. The format limits are
+     * not checked here; an action outside them fails at encode on the spool thread as before.
+     */
+    static long encodedLength(List<SchemaV1Row> rows) {
+        long total = 0L;
+        for (SchemaV1Row row : rows) total += encodedLength(row);
+        return total;
+    }
+
+    /** Q397 A: the exact byte length of one encoded row ({@link #ROW_FIXED_BYTES} plus the six strings' bytes). */
+    static long encodedLength(SchemaV1Row row) {
+        return ROW_FIXED_BYTES + stringBytes(row.actionCode()) + stringBytes(row.indexedUuid())
+                + stringBytes(row.indexedName()) + stringBytes(row.dimensionId())
+                + stringBytes(row.subjectIdentity()) + stringBytes(row.evidencePayload());
+    }
+
+    /**
+     * Q397 A: the bytes {@link #encodeString} writes after its 5-byte header: 0 for null; the strict UTF-8 length
+     * (1, 2 or 3 bytes per char, 4 per surrogate pair); or, when the string has an unpaired surrogate (strict UTF-8
+     * refuses it), 2 per char (UTF-16BE).
+     */
+    static long stringBytes(String value) {
+        if (value == null) return 0L;
+        int n = value.length();
+        long utf8 = 0L;
+        for (int i = 0; i < n; i++) {
+            char c = value.charAt(i);
+            if (c < 0x80) {
+                utf8 += 1L;
+            } else if (c < 0x800) {
+                utf8 += 2L;
+            } else if (Character.isHighSurrogate(c)) {
+                if (i + 1 < n && Character.isLowSurrogate(value.charAt(i + 1))) {
+                    utf8 += 4L;
+                    i++;
+                } else {
+                    return 2L * n;
+                }
+            } else if (Character.isLowSurrogate(c)) {
+                return 2L * n;
+            } else {
+                utf8 += 3L;
+            }
+        }
+        return utf8;
+    }
+
     /** Strict decode of a payload that must hold exactly {@code rowCount} rows. */
     static List<SchemaV1Row> decode(byte[] payload, int rowCount) throws UnreadableFrame {
         if (payload == null) throw new UnreadableFrame("payload absent");
