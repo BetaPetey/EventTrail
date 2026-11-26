@@ -8,6 +8,7 @@ import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Consumer;
 
@@ -40,7 +41,19 @@ public final class OwnActionCreditGuard {
          */
         PROOF_FAILURE("kill credit checks that failed"),
         /** A per-thread tracking stack was found not empty, closed out of order, or refused a push at its cap. */
-        SCOPE_LEAK("credit checks reset after left-over tracking");
+        SCOPE_LEAK("credit checks reset after left-over tracking"),
+        /**
+         * Item 2 F4 A (KL-3 4a): inside one real player's own attack (a listed bot's, say), the damage named another
+         * real player, who did not act. Label: DRAFT TEXT for the Owner.
+         */
+        OTHER_PLAYER_IN_ATTACK("kills inside one player's attack whose damage named another player"),
+        /**
+         * Item 2 F4 A (KL-4): the killing damage source was first used under a hit-back, another real player's
+         * attack, a device or a command, or where that check could not be read, and was used again after that ended
+         * (a revive or downed mod, say). Label: the Owner's Q429 (a) text.
+         */
+        REDELIVERED_SOURCE("kills by damage first used under a hit-back, another player's attack, a device, a command,"
+                + " or a check that could not be read");
 
         private final String label;
 
@@ -90,6 +103,25 @@ public final class OwnActionCreditGuard {
         return ledger.counts();
     }
 
+    /**
+     * Item 2 F4 A (the Owner's Q427 A): one DIRECT_PLAYER kill credit given outside that player's own click or key
+     * press. Not a withholding: the credit is kept. The Owner's figure for the option B decision. Never throws.
+     */
+    static void countDirectPlayerOutsideOwnInput() {
+        try {
+            ledger.directOutsideOwnInput.incrementAndGet();
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable ignored) {
+            // Counting never interrupts the game.
+        }
+    }
+
+    /** DIRECT_PLAYER kill credits given outside that player's own click or key press since the server started. */
+    public static long directPlayerCreditsOutsideOwnInput() {
+        return ledger.directOutsideOwnInput.get();
+    }
+
     /** A fresh ledger (server start): the counts restart at zero and SCOPE_LEAK may warn once again. */
     public static void resetAtServerStart() {
         ledger = new Ledger();
@@ -104,6 +136,7 @@ public final class OwnActionCreditGuard {
     private static final class Ledger {
         private final AtomicLongArray counts = new AtomicLongArray(Reason.values().length);
         private final AtomicBoolean leakWarned = new AtomicBoolean();
+        private final AtomicLong directOutsideOwnInput = new AtomicLong();
 
         void count(Reason reason) {
             counts.incrementAndGet(reason.ordinal());

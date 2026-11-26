@@ -455,6 +455,7 @@ public final class ExtendedLookup {
         lines.addAll(adapterMissStatusLines(AdapterFamilyMisses.counts()));
         lines.addAll(commandCreditStatusLines(CommandCreditGuard.counts()));
         lines.addAll(ownActionCreditStatusLines(OwnActionCreditGuard.counts()));
+        lines.addAll(directPlayerOutsideOwnInputStatusLines(OwnActionCreditGuard.directPlayerCreditsOutsideOwnInput()));
         lines.addAll(ContainerLabelFallbacks.statusLines());
         lines.add("§8§m-----------------------------------------------------");
         return List.copyOf(lines);
@@ -560,6 +561,7 @@ public final class ExtendedLookup {
         lines.addAll(adapterMissStatusLines(AdapterFamilyMisses.counts()));
         lines.addAll(commandCreditStatusLines(CommandCreditGuard.counts()));
         lines.addAll(ownActionCreditStatusLines(OwnActionCreditGuard.counts()));
+        lines.addAll(directPlayerOutsideOwnInputStatusLines(OwnActionCreditGuard.directPlayerCreditsOutsideOwnInput()));
         lines.add("§8§m-----------------------------------------------------");
         return List.copyOf(lines);
     }
@@ -691,6 +693,7 @@ public final class ExtendedLookup {
         lines.addAll(adapterMissStatusLines(AdapterFamilyMisses.counts()));
         lines.addAll(commandCreditStatusLines(CommandCreditGuard.counts()));
         lines.addAll(ownActionCreditStatusLines(OwnActionCreditGuard.counts()));
+        lines.addAll(directPlayerOutsideOwnInputStatusLines(OwnActionCreditGuard.directPlayerCreditsOutsideOwnInput()));
         lines.add("§8§m-----------------------------------------------------");
         return List.copyOf(lines);
     }
@@ -735,6 +738,18 @@ public final class ExtendedLookup {
         if (lines.isEmpty()) return List.of();
         lines.addFirst("§7Kill credits not given (not the player's own action) since server start:");
         return List.copyOf(lines);
+    }
+
+    /**
+     * Item 2 F4 option A (the Owner's Q381-Q384 answer, "bring the counter's figures from the 12-09 mini audit for the
+     * B decision"): how many kills since the server started were credited as a player's direct hit made outside that
+     * player's own click or key press (the Owner's Q427 A, with the status line "outside that player's own click or
+     * key press"). These credits are kept; the line only measures. Nothing when there is none.
+     */
+    static List<String> directPlayerOutsideOwnInputStatusLines(long count) {
+        if (count <= 0L) return List.of();
+        return List.of("§7Kills credited as a player's direct hit outside that player's own click or key press,"
+                + " since server start: §f" + count + " §8(counted for a later decision; these credits are kept)");
     }
 
     /**

@@ -38,6 +38,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -115,6 +116,8 @@ public final class NeoForgeEntityDeathAuditBridge {
             boolean deviceNamedPlayer = FakePlayerAttackGuard.resolveDamage(direct, causing).isPresent();
             // Command credit guard (review-01 F3): a source a command wrote a real player into gets the same redaction.
             if (!deviceNamedPlayer) deviceNamedPlayer = CommandCreditGuard.redactsSource(direct, causing);
+            // Item 2 F4 A (KL-3 4a): so does a source naming another real player inside one real player's own attack.
+            if (!deviceNamedPlayer) deviceNamedPlayer = PlayerAttackFrames.namesAnotherPlayer(direct, causing);
             EntityIdentity directIdentity = deviceNamedPlayer
                     ? redactDeviceNamedPlayer(directIdentityCapture.identity())
                     : directIdentityCapture.identity();
@@ -140,6 +143,9 @@ public final class NeoForgeEntityDeathAuditBridge {
                     causingUnavailable,
                     source,
                     damageTypeId);
+            // Item 2 F4 A (Q427 A): the status counter of direct-player credits given outside that player's own click
+            // or key press.
+            PlayerInputFrames.noteCredit(attribution);
             // Kill-weapon fix: a held item only for a direct player hitter whose weapon read threw (resolveWeapon).
             weapon = resolveWeapon(
                     weapon,
@@ -257,10 +263,12 @@ public final class NeoForgeEntityDeathAuditBridge {
                 && attribution.provenance() == EntityKillAttribution.ProvenanceKind.RETALIATION) {
             return new DeathRowParts(attribution, null, null, ItemStack.EMPTY, false);
         }
-        boolean refusedFrame = RetaliationScope.withheldUnderRefusedFrame(attribution);
+        boolean refusedFrame = RetaliationScope.withheldUnderRefusedFrame(attribution)
+                || FramedSources.withheld(attribution);
         if (refusedFrame) {
-            // Fold 02 ruling 1: the player (the causing player, and the direct entity when it is a player) and the
-            // weapon are dropped, as on a RETALIATION row; the row stays UNSUPPORTED_SECONDARY, counted once already.
+            // Fold 02 ruling 1, item 2 F2 for a check that threw, and item 2 F4 A for a re-delivered framed source: the
+            // player (the causing player, and the direct entity when it is a player) and the weapon are dropped, as on
+            // a RETALIATION row; the row stays UNSUPPORTED_SECONDARY, counted once already.
             if (isPlayerIdentity(directIdentity)) directIdentity = null;
             if (isPlayerIdentity(causingIdentity)) causingIdentity = null;
             weapon = ItemStack.EMPTY;
@@ -343,11 +351,34 @@ public final class NeoForgeEntityDeathAuditBridge {
                 () -> IronsSpellAuditRuntime.isIronSource(source)
                         || ArsSpellAuditRuntime.isArsDamage(victim, source));
         if (retaliation.isPresent()) return retaliation.get();
+        // Item 2 F4 A (KL-3 4a): inside one real player's own attack (a listed bot's, say), a source naming another real
+        // player credits nobody. After the retaliation rule, so a hit-back inside an attack stays RETALIATION.
+        Optional<EntityKillAttribution> otherPlayer = PlayerAttackFrames.resolveDamage(direct, causing);
+        if (otherPlayer.isPresent()) return otherPlayer.get();
+        // Item 2 F4 A (KL-4): a source first used under a hit-back, device or command frame, used again after that
+        // frame ended, credits nobody. After every frame rule, so a death inside its own frame keeps that answer.
+        Optional<EntityKillAttribution> redelivered = FramedSources.resolveDeath(source);
+        if (redelivered.isPresent()) return redelivered.get();
         // Known Iron's sources cannot borrow generic player/owner/last-hit credit.
         Optional<EntityKillAttribution> spell = IronsSpellAuditRuntime.resolveDamage(victim, source);
         if (spell.isPresent()) return spell.get();
         Optional<EntityKillAttribution> ars = ArsSpellAuditRuntime.resolveDamage(victim, source);
         if (ars.isPresent()) return ars.get();
+        return classifiedSource(directExtraction, causingExtraction, directUnavailable, causingUnavailable, source);
+    }
+
+    /**
+     * The last rule of {@link #attribution}: the classifier over the source's own facts. Also asked by
+     * {@link #provenOwnHit}, so the last-hit proof and the death row read one rule. Counts nothing.
+     */
+    private static EntityKillAttribution classifiedSource(
+            EntityExtraction directExtraction,
+            EntityExtraction causingExtraction,
+            boolean directUnavailable,
+            boolean causingUnavailable,
+            DamageSource source) {
+        Entity direct = directExtraction.entity();
+        Entity causing = causingExtraction.entity();
         boolean sameDirectAndCausing = !directUnavailable
                 && !causingUnavailable
                 && direct != null
@@ -423,7 +454,9 @@ public final class NeoForgeEntityDeathAuditBridge {
      * inside a command, or when the victim's last hit was made inside one (no rows for anything a command does); when
      * the game names no player (no player hit, or the window passed); when the hitter is the victim; when a mob, a pet
      * or another entity hit after the player (the player must be the game's very last attacker); when the last hit is
-     * older than {@link #LAST_HIT_WINDOW_TICKS}; under the Iron's, Ars, FakePlayer and Atomic Reconstructor guards of
+     * older than {@link #LAST_HIT_WINDOW_TICKS}; when no proof says that player's own hit made them the last attacker at
+     * that tick (item 2 F1, {@link LastHitProof}: a Thorns strike, an arrow the player did not shoot, a command's arrow,
+     * or a victim without the proof carrier); under the Iron's, Ars, FakePlayer and Atomic Reconstructor guards of
      * {@link #permitsEngineCredit}; and when the hitter is no admitted real player: a NeoForge FakePlayer, a mod's
      * unlisted fake, or a player who left or respawned (the game also drops them as last attacker once they are gone).
      * Package-private for the behaviour tests, which supply {@code admitted}.</p>
@@ -448,11 +481,61 @@ public final class NeoForgeEntityDeathAuditBridge {
         if (victim.getLastHurtByMob() != hitter) return null;
         int age = victim.tickCount - victim.getLastHurtByMobTimestamp();
         if (age < 0 || age > LAST_HIT_WINDOW_TICKS) return null;
+        // Item 2 F1: the game names its last attacker from any damage that attacker caused (a Thorns strike, a
+        // machine's arrow, a command's arrow), so the hurt step's proof must name this hitter at this very tick.
+        if (!(victim instanceof LastHitProofCarrier proof)
+                || !hitter.getUUID().equals(proof.eventtrail$provenLastHitPlayer())
+                || proof.eventtrail$provenLastHitTick() != victim.getLastHurtByMobTimestamp()) {
+            return null;
+        }
         if (!permitsEngineCredit(victim, damageTypeId)) return null;
         if (hitter.isRemoved() || !admitted.test(hitter)) return null;
         String name = hitter.getName().getString();
         if (name == null || name.isBlank()) return null;
         return new CommittedEntityDeathEvidence.LastHit(hitter.getUUID(), name);
+    }
+
+    /**
+     * Item 2 F1 (KL-265, KL-177, KL-176): whether the hit that just made {@code attacker} the victim's last attacker is
+     * that real player's own act, asked by {@link LastHitProof} at the hurt step. True only when the attacker is a listed
+     * real player and the rules a death row by this very damage would ask credit them: no command running, the player
+     * is the causing entity, no
+     * FakePlayer attack names them, no other real player's attack is running (item 2 F4 A), the source was not first
+     * used under a frame, no hit-back signal or refused frame matches (Thorns), no Iron's or Ars rule owns
+     * the source, and the classifier gives them a hit, a projectile proven theirs, or TNT they lit. Counts nothing and
+     * changes nothing; package-private for the behaviour tests.
+     */
+    static boolean provenOwnHit(
+            LivingEntity victim, LivingEntity attacker, DamageSource source, ResourceLocation damageTypeId) {
+        // The listed check counts nothing (isAdmittedPlayer counts each refusal), and an unlisted hitter proves nothing.
+        if (!(attacker instanceof ServerPlayer player)
+                || NeoForgePlayerProvenance.isSynthetic(player)
+                || !NeoForgePlayerProvenance.isListedPlayer(player)) {
+            return false;
+        }
+        if (CommandCreditGuard.active()) return false;
+        Entity direct = source.getDirectEntity();
+        Entity causing = source.getEntity();
+        if (causing != player) return false;
+        if (FakePlayerAttackGuard.resolveDamage(direct, causing).isPresent()) return false;
+        // Item 2 F4 A: nor inside another real player's own attack, nor by a source first used under a frame (a mark
+        // set at this same hurt step needs one of the frame rules here, so the order of the two hurt hooks is moot).
+        if (PlayerAttackFrames.namesAnotherPlayer(direct, causing)) return false;
+        if (FramedSources.marked(source)) return false;
+        BooleanSupplier spellSource = () -> IronsSpellAuditRuntime.isIronSource(source)
+                || ArsSpellAuditRuntime.isArsDamage(victim, source);
+        if (spellSource.getAsBoolean()) return false;
+        if (RetaliationScope.match(victim, direct, causing, false, false, damageTypeId, spellSource).isPresent()) {
+            return false;
+        }
+        EntityKillAttribution own = classifiedSource(
+                new EntityExtraction(direct, false), new EntityExtraction(causing, false), false, false, source);
+        EntityKillAttribution.ProvenanceKind kind = own.provenance();
+        return (kind == EntityKillAttribution.ProvenanceKind.DIRECT_PLAYER
+                || kind == EntityKillAttribution.ProvenanceKind.PLAYER_PROJECTILE
+                || kind == EntityKillAttribution.ProvenanceKind.TNT_IGNITER)
+                && own.accountablePlayer() != null
+                && player.getUUID().equals(own.accountablePlayer().playerId());
     }
 
     /**

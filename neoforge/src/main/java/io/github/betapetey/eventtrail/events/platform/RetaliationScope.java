@@ -45,7 +45,8 @@ import java.util.function.BooleanSupplier;
  * and is asked after the three signals: the marker cannot prove a hit-back, so a real player's death that no signal
  * matched is UNSUPPORTED_SECONDARY, counted once as PROOF_FAILURE (the refusal itself was counted SCOPE_LEAK at the
  * push). Its row stores no player identity and no weapon (lead ruling 1 of fold 02): the bridge knows it by the one
- * value {@link #resolveDeath} returns for it ({@link #withheldUnderRefusedFrame}). Each signal is proof by itself, so a
+ * value {@link #resolveDeath} returns for it ({@link #withheldUnderRefusedFrame}; a check that throws gets the same treatment
+ * through its own marked value, item 2 F2). Each signal is proof by itself, so a
  * hit-back a signal proves under the marker stays RETALIATION ("Killed by Thorns"), counted once as RETALIATION (lead
  * ruling 7 of fold 02, re-check 01 check 2). A death by any other entity under the marker keeps today's rules, so a
  * zombie's or a pet's kill names that killer.</p>
@@ -66,6 +67,12 @@ public final class RetaliationScope {
      * (lead ruling 1 of fold 02), so no stack is asked a second time.
      */
     private static final EntityKillAttribution WITHHELD_UNDER_REFUSED_FRAME =
+            EntityKillAttribution.unattributed(EntityKillAttribution.ProvenanceKind.UNSUPPORTED_SECONDARY);
+    /**
+     * The one attribution {@link #resolveDeath} returns when its own check threw (item 2 F2). The check could not rule
+     * out a hit-back, so, like {@link #WITHHELD_UNDER_REFUSED_FRAME}, its row stores no player identity and no weapon.
+     */
+    private static final EntityKillAttribution WITHHELD_AFTER_CHECK_FAILURE =
             EntityKillAttribution.unattributed(EntityKillAttribution.ProvenanceKind.UNSUPPORTED_SECONDARY);
     private static final ThreadLocal<ScopeStack> VICTIM_FRAMES =
             ThreadLocal.withInitial(() -> new ScopeStack("Thorns and hit-back frames"));
@@ -176,19 +183,19 @@ public final class RetaliationScope {
             throw fatal;
         } catch (Throwable failure) {
             OwnActionCreditGuard.count(OwnActionCreditGuard.Reason.PROOF_FAILURE);
-            return Optional.of(EntityKillAttribution.unattributed(
-                    EntityKillAttribution.ProvenanceKind.UNSUPPORTED_SECONDARY));
+            // Item 2 F2: the marked value, so the bridge drops the player's identities and the weapon.
+            return Optional.of(WITHHELD_AFTER_CHECK_FAILURE);
         }
     }
 
     /**
-     * Whether {@code attribution} is {@link #resolveDeath}'s own result for a real player's death under a refused
-     * VICTIM-frame push (lead ruling 1 of fold 02): that one value, compared by identity. Every other
-     * UNSUPPORTED_SECONDARY result (a throw here, an unadmitted spell) is another value and keeps today's row parts.
-     * Package-private for the bridge.
+     * Whether {@code attribution} is one of {@link #resolveDeath}'s two withheld results whose row stores no player
+     * identity and no weapon: a real player's death under a refused VICTIM-frame push (lead ruling 1 of fold 02), or a
+     * death whose check threw (item 2 F2). Those two values, compared by identity; every other UNSUPPORTED_SECONDARY
+     * result (an unadmitted spell, say) is another value and keeps today's row parts. Package-private for the bridge.
      */
     static boolean withheldUnderRefusedFrame(EntityKillAttribution attribution) {
-        return attribution == WITHHELD_UNDER_REFUSED_FRAME;
+        return attribution == WITHHELD_UNDER_REFUSED_FRAME || attribution == WITHHELD_AFTER_CHECK_FAILURE;
     }
 
     /**

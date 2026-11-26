@@ -17,6 +17,11 @@ import java.util.UUID;
  * NeoForge 1.21.1 boundary proving canonical TNT creation inside the exact
  * serverbound use-on-block operation that targeted a TNT block. Merely storing
  * a Player owner on PrimedTnt is not sufficient human-action evidence.
+ *
+ * <p>KL-60 (item 2 F3): the packet and ignition contexts are stored unarmed and armed only after their
+ * {@code ThreadLocal.set} returns. A set that throws after storing (a {@link VirtualMachineError} in its clean-up)
+ * leaves an unarmed context that proves nothing; as before, every later packet or ignition on that thread is refused
+ * until stop (D-673).</p>
  */
 public final class NeoForgeTntActionAuditBridge {
     private static final ThreadLocal<PacketContext> ACTIVE_PACKET = new ThreadLocal<>();
@@ -40,6 +45,9 @@ public final class NeoForgeTntActionAuditBridge {
         // N-1: the boundary is built before ACTIVE_PACKET is set, so a failure while building it leaves nothing open.
         PacketBoundary boundary = new PacketBoundary(context);
         ACTIVE_PACKET.set(context);
+        // KL-60: armed only once the set has returned.
+        context.armed = true;
+        context.valid = true;
         return boundary;
     }
 
@@ -79,6 +87,9 @@ public final class NeoForgeTntActionAuditBridge {
         // N-1: the boundary is built before ACTIVE_IGNITION is set, so a failure while building it leaves nothing open.
         IgnitionBoundary boundary = new IgnitionBoundary(context);
         ACTIVE_IGNITION.set(context);
+        // KL-60: armed only once the set has returned.
+        context.armed = true;
+        context.valid = true;
         return boundary;
     }
 
@@ -207,7 +218,9 @@ public final class NeoForgeTntActionAuditBridge {
     private static final class PacketContext {
         private final ServerPlayer player;
         private final BlockPos target;
-        private boolean valid = true;
+        /** Set once the context's own set returned (KL-60); an unarmed context is never valid. */
+        private boolean armed;
+        private boolean valid;
 
         private PacketContext(ServerPlayer player, BlockPos target) {
             this.player = player;
@@ -218,7 +231,9 @@ public final class NeoForgeTntActionAuditBridge {
     private static final class IgnitionContext {
         private final PacketContext packet;
         private PrimedTnt candidate;
-        private boolean valid = true;
+        /** Set once the context's own set returned (KL-60); an unarmed context is never valid. */
+        private boolean armed;
+        private boolean valid;
 
         private IgnitionContext(PacketContext packet) {
             this.packet = packet;

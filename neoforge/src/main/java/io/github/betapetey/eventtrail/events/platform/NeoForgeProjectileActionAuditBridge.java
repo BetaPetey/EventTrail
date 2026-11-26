@@ -11,6 +11,10 @@ import java.util.UUID;
  * synchronously inside a real ServerGamePacketListenerImpl use/release action.
  * No candidate outlives that packet call; the retained projectile marker is a
  * single UUID and is cleared whenever ownership changes without that proof.
+ *
+ * <p>KL-60 (item 2 F3): a context is stored unarmed and armed only after {@code ThreadLocal.set} returns. A set that
+ * throws after storing (a {@link VirtualMachineError} in its clean-up) leaves an unarmed context that proves nothing;
+ * as before, every later {@link #begin} on that thread refuses until stop (D-673).</p>
  */
 public final class NeoForgeProjectileActionAuditBridge {
     private static final ThreadLocal<ActionContext> ACTIVE_ACTION = new ThreadLocal<>();
@@ -37,6 +41,9 @@ public final class NeoForgeProjectileActionAuditBridge {
         // N-1: the boundary is built before ACTIVE_ACTION is set, so a failure while building it leaves nothing open.
         Boundary boundary = new Boundary(context);
         ACTIVE_ACTION.set(context);
+        // KL-60: armed only once the set has returned.
+        context.armed = true;
+        context.valid = true;
         return boundary;
     }
 
@@ -94,7 +101,9 @@ public final class NeoForgeProjectileActionAuditBridge {
 
     private static final class ActionContext {
         private final ServerPlayer player;
-        private boolean valid = true;
+        /** Set once the context's own set returned (KL-60); an unarmed context is never valid. */
+        private boolean armed;
+        private boolean valid;
 
         private ActionContext(ServerPlayer player) {
             this.player = player;
