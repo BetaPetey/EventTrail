@@ -11,7 +11,7 @@ import java.util.Optional;
 
 /**
  * The bottom rule with the one pager: " ◀ Prev | Page p/t | Next ▶ " centred in a 320 px rule (Owner Q217 B arrows).
- * An active arrow is GREEN, runs "/eventtrail page N" and has the one-line hover "Click: page N"; an inactive arrow is
+ * An active arrow is GRAY (#AAAAAA, the same as "Page p/t"; Owner 6:48 AM 11-26), runs "/eventtrail page N" and has the one-line hover "Click: page N"; an inactive arrow is
  * DARK_GRAY with no hover and no click; "Page p/t" puts "/eventtrail page " in the chat box, hover
  * "Click: type a page number" (Owner 9:51 PM 11-22 and lead calls under D-314).
  */
@@ -40,7 +40,7 @@ public final class PageNavigationComponentRenderer {
     private static MutableComponent arrow(String text, Optional<String> command, int target) {
         if (command.isEmpty()) return Component.literal(text).withStyle(ChatFormatting.DARK_GRAY);
         return Component.literal(text).withStyle(style -> style
-                .withColor(ChatFormatting.GREEN)
+                .withColor(ChatFormatting.GRAY)
                 .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
                         Component.literal("Click: page " + target).withStyle(ChatFormatting.YELLOW)))
                 .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command.get())));
