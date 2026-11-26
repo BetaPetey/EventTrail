@@ -6,6 +6,7 @@ import codechicken.enderstorage.init.EnderStorageModContent;
 import codechicken.enderstorage.manager.EnderStorageManager;
 import codechicken.enderstorage.storage.EnderItemStorage;
 import codechicken.enderstorage.tile.TileEnderChest;
+import codechicken.lib.colour.EnumColour;
 import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
 import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
@@ -16,14 +17,19 @@ import io.github.betapetey.eventtrail.inventory.core.AccessKind;
 import io.github.betapetey.eventtrail.inventory.core.BackingContextKind;
 import io.github.betapetey.eventtrail.inventory.core.ContainerTarget;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 /** One menu's live native access owner and shared storage. Channel key never supplies an actor. */
 public final class EnderStorageBinding {
@@ -72,11 +78,21 @@ public final class EnderStorageBinding {
      * another reason inside the call would bind to the wrong channel.
      */
     static Optional<EnderStorageBinding> proven(EnderOpeningScope.Opening opening, ContainerEnderItemStorage menu, EnderItemStorage storage) {
+        return proven(opening, menu, storage, EnderStorageBinding::nativeKey);
+    }
+    /** As {@link #proven(EnderOpeningScope.Opening, ContainerEnderItemStorage, EnderItemStorage)}, with the key text the guard checks (test seam). */
+    static Optional<EnderStorageBinding> proven(EnderOpeningScope.Opening opening, ContainerEnderItemStorage menu, EnderItemStorage storage,
+            Function<Frequency, String> keyText) {
         if (storage == null || storage.getClass() != EnderItemStorage.class || menu.getClass() != ContainerEnderItemStorage.class
                 || menu.chestInv != storage || !wellFormed(opening.frequency()) || !wellFormed(storage.freq)
                 || (opening.chest() != null ? 1 : 0) + (opening.pouch() != null ? 1 : 0) + (opening.mounted() != null ? 1 : 0) != 1
                 || opening.mounted() != null && !opening.frequency().equals(storage.freq)) {
             shapeFailed(menu);
+            return Optional.empty();
+        }
+        // KL-50 key guard: a build whose key text leaves out a channel field would merge two channels under one key.
+        if (!keyTextHoldsEveryField(opening.frequency(), keyText) || !keyTextHoldsEveryField(storage.freq, keyText)) {
+            RecordingGaps.keyTextFailed(AdapterKey.ENDER_STORAGE, KEY_TEXT_SITE);
             return Optional.empty();
         }
         var binding = new EnderStorageBinding(opening, menu, storage);
@@ -87,6 +103,48 @@ public final class EnderStorageBinding {
         return frequency != null && frequency.left() != null && frequency.middle() != null && frequency.right() != null
                 && frequency.owner() != null && frequency.ownerName() != null
                 && frequency.owner().isPresent() == frequency.ownerName().isPresent();
+    }
+    /** KL-50 key guard: the fail-safe site of a bind refused because the key text leaves out a channel field (DRAFT TEXT for the Owner). */
+    static final String KEY_TEXT_SITE = "adapter:EnderStorageBinding.keyText";
+    /**
+     * KL-50 key guard (Owner Q381: "Build the KL-50 key guard for Ender."): true only when {@code keyText} gives the
+     * well-formed {@code frequency} a key that changes whenever a field {@link #wellFormed} reads changes: each of the
+     * three colours, and the owner (another owner, or no owner, for an owned channel; an owner for a public one). The
+     * owner's display name is read by wellFormed only for its presence, which must match the owner's, so the owner
+     * covers it; its text names no channel (the native manager keeps a renamed owner's channel). A key text that is
+     * null or throws fails. Otherwise a changed build's key text could merge two channels' history under one key.
+     */
+    static boolean keyTextHoldsEveryField(Frequency frequency, Function<Frequency, String> keyText) {
+        if (!wellFormed(frequency) || keyText == null) return false;
+        try {
+            String key = keyText.apply(frequency);
+            if (key == null) return false;
+            for (Frequency changed : oneFieldChanged(frequency)) if (key.equals(keyText.apply(changed))) return false;
+            return true;
+        } catch (RuntimeException | LinkageError unreadable) {
+            return false;
+        }
+    }
+    /** KL-50: {@code frequency} with exactly one channel field changed, once for each field wellFormed reads. */
+    private static List<Frequency> oneFieldChanged(Frequency frequency) {
+        EnumColour left = frequency.left(), middle = frequency.middle(), right = frequency.right();
+        Optional<UUID> owner = frequency.owner(); Optional<Component> name = frequency.ownerName();
+        List<Frequency> changed = new ArrayList<>(5);
+        changed.add(new Frequency(next(left), middle, right, owner, name));
+        changed.add(new Frequency(left, next(middle), right, owner, name));
+        changed.add(new Frequency(left, middle, next(right), owner, name));
+        if (owner.isPresent()) {
+            UUID id = owner.get();
+            changed.add(new Frequency(left, middle, right, Optional.of(new UUID(id.getMostSignificantBits(), ~id.getLeastSignificantBits())), name));
+            changed.add(new Frequency(left, middle, right, Optional.empty(), Optional.empty()));
+        } else {
+            changed.add(new Frequency(left, middle, right, Optional.of(new UUID(0L, 0L)), Optional.of(Component.empty())));
+        }
+        return changed;
+    }
+    private static EnumColour next(EnumColour colour) {
+        EnumColour[] all = EnumColour.values();
+        return all[(colour.ordinal() + 1) % all.length];
     }
     static String nativeKey(Frequency frequency) {
         if (!wellFormed(frequency)) throw new IllegalArgumentException("Unproven native frequency");

@@ -34,6 +34,11 @@ public final class RecordingGaps {
     static final long REPEAT_INTERVAL_MILLIS = 60_000L;
     /** B48: the reason of a binding shape refusal (the plan's text). */
     public static final String BINDING_SHAPE_REASON = "menu did not pass the binding shape check";
+    /**
+     * Q429 (c) (Owner, 9:51 PM ET 11-25, "take all three proposals, (a), (b) and (c), as written"): the reason of a
+     * key text refusal. The menu passed the binding shape check; its key text is what failed.
+     */
+    public static final String KEY_TEXT_REASON = "the menu's key text was not in the form this build reads";
     /** r2 MINOR-1: the detail of a drop whose adapter is disabled at run time (counted only, see {@link #drop}). */
     public static final String ADAPTER_DISABLED = "adapter-disabled";
     private static final int MAX_DETAIL = 48;
@@ -161,6 +166,23 @@ public final class RecordingGaps {
             if (!enabled || key == null) return;
             ledger.count(Gap.BINDING_SHAPE);
             AdapterFailSafe.refusedOnce(key, site, BINDING_SHAPE_REASON);
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable ignored) {
+            // A warning never reaches the binding it describes.
+        }
+    }
+
+    /**
+     * KL-50, Q429 (c): as {@link #bindingShapeFailed}, for a menu that passed the binding shape check but whose key
+     * text is not in the form this build reads (it leaves out a channel field). Counted as the same gap; its one
+     * warning per key, site and reason gives {@link #KEY_TEXT_REASON}. The key stays ON.
+     */
+    public static void keyTextFailed(AdapterKey key, String site) {
+        try {
+            if (!enabled || key == null) return;
+            ledger.count(Gap.BINDING_SHAPE);
+            AdapterFailSafe.refusedOnce(key, site, KEY_TEXT_REASON);
         } catch (VirtualMachineError fatal) {
             throw fatal;
         } catch (Throwable ignored) {

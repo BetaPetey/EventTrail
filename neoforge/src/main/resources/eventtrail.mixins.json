@@ -22,6 +22,7 @@
     "IronsEngineCreditMixin",
     "LastHitProofMixin",
     "LivingEntityDeathMixin",
+    "PayloadInputCountMixin",
     "PlayerActionScopeChunkTaskMixin",
     "PlayerActionScopeInteractMixin",
     "PlayerActionScopeLevelMixin",

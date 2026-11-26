@@ -52,6 +52,17 @@ public final class ItemsNotTrackedOpens {
                 + " mod's handler could have opened it)"),
         ITEM_USE("an item or another mod's click handler could have opened the screen (an off-hand use, an item use"
                 + " after the click, or a later click)"),
+        /**
+         * F7 (KL-168, Owner Q381 "F7: (1)."): the click was not the player's only input in its server tick, so a
+         * handler of that other input (or a task it queued for later in the tick) could have opened the screen; or the
+         * player rides something with its own inventory screen (the inventory key's packet posts no event). The Owner
+         * approved the label (Q381 "F7: (1)." and Q441 A, 12:29 AM ET 11-26, which added "letting go of a held item"
+         * and "a message from a mod" for D-674's two inputs).
+         */
+        OTHER_INPUT("another input from the player in the same server tick could have opened the screen (another"
+                + " click, an item or entity use, a block hit, an attack, a command, a chat line, a click in a screen"
+                + " or its close, a hand swap or an item toss, letting go of a held item, a message from a mod, or"
+                + " riding something with its own inventory screen)"),
         NO_BLOCK_ENTITY("the clicked block has no block entity"),
         BLOCK_CHANGED("the clicked block changed before the screen opened"),
         OTHER_BLOCK("the screen's slots belong to another block, or are too many to check"),

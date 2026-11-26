@@ -56,6 +56,7 @@ public final class EventTrailMixinPlugin implements IMixinConfigPlugin {
             "ItemEntityMixin",
             "LastHitProofMixin",
             "LivingEntityDeathMixin",
+            "PayloadInputCountMixin",
             "PlayerActionScopeChunkTaskMixin",
             "PlayerActionScopeInteractMixin",
             "PlayerActionScopeLevelMixin",

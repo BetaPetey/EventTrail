@@ -34,6 +34,7 @@ import io.github.betapetey.eventtrail.inventory.core.PhysicalContainerLocationBi
 import io.github.betapetey.eventtrail.inventory.core.AccessKind;
 import io.github.betapetey.eventtrail.inventory.moving.MovingStorageEpoch;
 import io.github.betapetey.eventtrail.events.location.AuditBlockLocations;
+import io.github.betapetey.eventtrail.events.platform.NeoForgePlayerProvenance;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalMenuAdapterLoader;
 import io.github.betapetey.eventtrail.inventory.spi.AdapterMatch;
@@ -57,11 +58,13 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.CompoundContainer;
 import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.ItemInteractionResult;
 import net.minecraft.world.MenuProvider;
+import net.minecraft.world.entity.HasCustomInventoryScreen;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
@@ -76,7 +79,12 @@ import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.capabilities.Capabilities;
+import net.neoforged.neoforge.event.CommandEvent;
+import net.neoforged.neoforge.event.ServerChatEvent;
 import net.neoforged.neoforge.event.entity.item.ItemTossEvent;
+import net.neoforged.neoforge.event.entity.living.LivingEntityUseItemEvent;
+import net.neoforged.neoforge.event.entity.living.LivingSwapItemsEvent;
+import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
 import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerContainerEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
@@ -95,6 +103,7 @@ import net.neoforged.neoforge.items.wrapper.PlayerInvWrapper;
 import net.neoforged.neoforge.items.wrapper.PlayerMainInvWrapper;
 import net.neoforged.neoforge.items.wrapper.PlayerOffhandInvWrapper;
 import net.neoforged.neoforge.items.wrapper.RangedWrapper;
+import net.neoforged.neoforge.items.wrapper.SidedInvWrapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -104,6 +113,7 @@ import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -174,6 +184,8 @@ public final class UniversalContainerTracker {
     private static final String SITE_ENTRY_POINT = "menu tracker entry point";
     private static final long TARGET_TTL_MS = 5_000L;
     private static final Map<UUID, RecentTarget> RECENT_TARGETS = new ConcurrentHashMap<>();
+    /** Own-slot "opened" line, F7 (KL-168): each tracked player's latest input tick and its input count. */
+    private static final Map<UUID, InputTick> INPUT_TICKS = new ConcurrentHashMap<>();
     private static final Map<UUID, Session> SESSIONS = new ConcurrentHashMap<>();
     private static final ThreadLocal<ActionToken> ACTIVE_AUTHORITATIVE_ACTION = new ThreadLocal<>();
     private static final AtomicLong NEXT_SESSION_ID = new AtomicLong();
@@ -323,7 +335,98 @@ public final class UniversalContainerTracker {
     @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
     public static void onUseItemOnBlockFirst(UseItemOnBlockEvent event) {
         if (event.getUsePhase() != UseItemOnBlockEvent.UsePhase.ITEM_AFTER_BLOCK) return;
-        markClickBefore(event::getPlayer);
+        // F7: a phase of the click being handled, not another input, so it is not counted.
+        markClickBefore(event::getPlayer, false);
+    }
+
+    /**
+     * Own-slot "opened" line, F7 (KL-168, Owner Q381 "F7: (1)."): a command the player ran (typed, or from a sign or
+     * book click with the player as its source) is another input, whose handlers can open a screen. HIGHEST, so it is
+     * counted before any other mod's handler of it runs. A command with no player source counts for no one.
+     */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onCommandFirst(CommandEvent event) {
+        countInputBefore(() -> event.getParseResults().getContext().getSource().getEntity());
+    }
+
+    /** F7: as {@link #onCommandFirst}, for a chat line the player sent. */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onServerChatFirst(ServerChatEvent event) {
+        countInputBefore(event::getPlayer);
+    }
+
+    /** F7: as {@link #onCommandFirst}, for a hit on a block (the start, stop or abort of breaking it). */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onLeftClickBlockFirst(PlayerInteractEvent.LeftClickBlock event) {
+        countInputBefore(event::getEntity);
+    }
+
+    /** F7: as {@link #onCommandFirst}, for an attack on an entity. */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onAttackEntityFirst(AttackEntityEvent event) {
+        countInputBefore(event::getEntity);
+    }
+
+    /** F7: as {@link #onCommandFirst}, for the swap-hands key. */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onSwapHandsFirst(LivingSwapItemsEvent.Hands event) {
+        countInputBefore(event::getEntity);
+    }
+
+    /** F7: as {@link #onCommandFirst}, for an item the player tossed (the drop key, or a throw from a screen). */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onItemTossFirst(ItemTossEvent event) {
+        countInputBefore(event::getPlayer);
+    }
+
+    /**
+     * F7: as {@link #onCommandFirst}, for a screen that closes (a mod may open another screen as one closes). The game's
+     * own close of an open screen before it opens another counts too: that only refuses more, and a click on a block
+     * normally comes with no screen open. Not cancelable, so it takes no canceled events.
+     */
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onContainerCloseFirst(PlayerContainerEvent.Close event) {
+        countInputBefore(event::getEntity);
+    }
+
+    /**
+     * D-674 (ct-01 check-1 M1): as {@link #onCommandFirst}, for the release of an item in use (a bow or any item held
+     * in use; the game's RELEASE_USE_ITEM action posts it), whose handlers, another mod's included, can open a screen.
+     * Any other living entity is no player and counts for no one.
+     */
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public static void onUseItemStopFirst(LivingEntityUseItemEvent.Stop event) {
+        countInputBefore(event::getEntity);
+    }
+
+    /**
+     * D-674 (ct-01 check-1 M1): a mod's own network packet (a custom payload: most "open the X screen" keys and buttons)
+     * is another input. EventTrail's core payload hook hands each task NeoForge's server payload context runs for a
+     * payload through here: the returned task counts one input of the packet's sender on the server thread, then runs
+     * {@code work}, so the input is counted before the payload's handler runs. With no play-phase sender (the
+     * configuration phase) {@code work} is returned unchanged; a null task stays null. The sender is read from the
+     * connection when the task runs. Nothing here or in the count reaches the work short of a
+     * {@link VirtualMachineError}: a failed count, as every other, sets the player's click aside (CHECK_FAILED).
+     */
+    public static Runnable countPayloadInputFirst(Object listener, Runnable work) {
+        if (work == null || !(listener instanceof ServerGamePacketListenerImpl connection)) return work;
+        return () -> {
+            countPayloadSender(connection);
+            work.run();
+        };
+    }
+
+    /** D-674: as {@link #countPayloadInputFirst(Object, Runnable)}, for the value-returning form of the work. */
+    public static <T> Supplier<T> countPayloadInputFirst(Object listener, Supplier<T> work) {
+        if (work == null || !(listener instanceof ServerGamePacketListenerImpl connection)) return work;
+        return () -> {
+            countPayloadSender(connection);
+            return work.get();
+        };
+    }
+
+    private static void countPayloadSender(ServerGamePacketListenerImpl connection) {
+        countInputBefore(() -> connection.player);
     }
 
     /**
@@ -965,7 +1068,10 @@ public final class UniversalContainerTracker {
      * clicked block and its block entity are still there, no slot of the screen shows another block's storage, and
      * either some slot is not provably the player's own inventory or the clicked block holds items the server can see
      * (Owner Q16 and decision 32 A: a screen with no slot, or only the player's own inventory, gets no row and is
-     * counted NO_ITEM_SLOTS only when the clicked block also exposes no container and no item handler). The row names
+     * counted NO_ITEM_SLOTS only when the clicked block also exposes no container and no item handler). F7 (KL-168,
+     * Owner Q381 "F7: (1)."): also only when the click was the player's only counted input in its tick and the player
+     * rides nothing with its own inventory screen (else OTHER_INPUT), and the other-block check reads through NeoForge's
+     * sided, range and combined wrappers ({@link #slotStorageRefusal}). The row names
      * the clicked block and carries the "items not tracked" provider; no item row is ever written for the screen. Any
      * other open gets no row and is counted (one WARN per reason per server start); it never blocks the menu. Returns
      * whether the OPEN was handed to the access bridge. Nothing it throws reaches the open short of a
@@ -978,6 +1084,7 @@ public final class UniversalContainerTracker {
             Level level = player.level();
             BlockEntity block = null;
             BlockItems blockItems = null;
+            InputTick inputs = null;
             if (recent == null || recent.blockId == null) {
                 refusal = ItemsNotTrackedOpens.Refusal.NO_BLOCK_CLICK;
             } else if (recent.tick == RecentTarget.NO_TICK || clickedId == null) {
@@ -988,12 +1095,20 @@ public final class UniversalContainerTracker {
                 refusal = ItemsNotTrackedOpens.Refusal.NO_BLOCK_USE;
             } else if (recent.itemMayOpen) {
                 refusal = ItemsNotTrackedOpens.Refusal.ITEM_USE;
+            } else if ((inputs = INPUT_TICKS.get(player.getUUID())) == null || inputs.tick() != recent.tick) {
+                // F7 (KL-168): the click's own input was not counted (its count failed or was cleared).
+                refusal = ItemsNotTrackedOpens.Refusal.CHECK_FAILED;
+            } else if (inputs.count() > 1 || player.getVehicle() instanceof HasCustomInventoryScreen) {
+                // F7 (KL-168, Owner Q381 "F7: (1)."): another input of this player in the click's tick could have
+                // opened this screen; so could the inventory key while riding something with its own inventory screen
+                // (that key's packet posts no event).
+                refusal = ItemsNotTrackedOpens.Refusal.OTHER_INPUT;
             } else if ((block = level.getBlockEntity(recent.pos)) == null) {
                 refusal = ItemsNotTrackedOpens.Refusal.NO_BLOCK_ENTITY;
             } else if (!clickedId.equals(canonicalBlockId(player, recent.pos))) {
                 refusal = ItemsNotTrackedOpens.Refusal.BLOCK_CHANGED;
-            } else if (!slotsShowOnlyThisBlock(player, menu, level, recent.pos)) {
-                refusal = ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+            } else if ((refusal = slotStorageRefusal(player, menu, level, recent.pos)) != null) {
+                // F7 (KL-168): the refusal is set: OTHER_BLOCK, or CHECK_FAILED when a wrapper's field was unreadable.
             } else if (!hasSlotThatMayHoldThisBlocksItems(player, menu)
                     && !(blockItems = clickedBlockItems(level, recent.pos, block)).held()) {
                 // Owner Q16: a screen that stores no items writes no OPEN or CLOSE row. Decision 32 A: only when the
@@ -1039,28 +1154,101 @@ public final class UniversalContainerTracker {
     }
 
     /**
-     * Own-slot "opened" line: false when a slot of the menu visibly holds another block's storage (a block entity at
-     * another position or in another level, directly, through a SlotItemHandler or its InvWrapper), a double
-     * container, or a null slot, or when the menu has more slots than are ever checked. A slot whose storage shows no
-     * block (the mod's own slot object) says nothing either way.
+     * Own-slot "opened" line: OTHER_BLOCK when a slot of the menu visibly holds another block's storage (a block entity
+     * at another position or in another level, directly or through a SlotItemHandler), a double container, or a null
+     * slot, or when the menu has more slots than are ever checked; null when none does. A slot whose storage shows no
+     * block (the mod's own slot object or handler) says nothing either way. F7 (KL-168, Owner Q381 "F7: (1)."): NeoForge's
+     * InvWrapper, SidedInvWrapper, RangedWrapper and CombinedInvWrapper (and their subclasses, read through the
+     * NeoForge class's own field) are unwrapped, also inside one another, so a slot over another block through them is
+     * refused too; more than {@link #MAX_UNWRAP_DEPTH} wrappers inside one another, or more wrappers in one menu than it
+     * may have slots, is refused as too many to check. A wrapper whose field could not be opened or read cannot be
+     * checked: CHECK_FAILED (that screen gets no line).
      */
-    private static boolean slotsShowOnlyThisBlock(ServerPlayer player, AbstractContainerMenu menu, Level level,
-            BlockPos pos) {
+    private static ItemsNotTrackedOpens.Refusal slotStorageRefusal(ServerPlayer player, AbstractContainerMenu menu,
+            Level level, BlockPos pos) {
         List<Slot> slots = menu.slots;
-        if (slots.size() > MAX_MENU_DESCRIPTORS) return false;
-        for (Slot slot : slots) {
-            if (slot == null) return false;
-            Object storage = slot.container;
-            if (slot instanceof SlotItemHandler handlerSlot) {
-                storage = handlerSlot.getItemHandler();
-                if (storage instanceof InvWrapper wrapper) storage = wrapper.getInv();
+        if (slots.size() > MAX_MENU_DESCRIPTORS) return ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+        StorageWalk walk = new StorageWalk(player.getInventory(), level, pos, wrapperFields());
+        try {
+            for (Slot slot : slots) {
+                if (slot == null) return ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+                Object storage = slot instanceof SlotItemHandler handlerSlot
+                        ? handlerSlot.getItemHandler()
+                        : slot.container;
+                ItemsNotTrackedOpens.Refusal refusal = walk.refusal(storage, 0);
+                if (refusal != null) return refusal;
             }
-            if (storage == player.getInventory()) continue;
-            if (storage instanceof CompoundContainer) return false;
-            if (storage instanceof BlockEntity other
-                    && (other.getLevel() != level || !pos.equals(other.getBlockPos()))) return false;
+        } catch (ReflectiveOperationException | RuntimeException unreadable) {
+            return ItemsNotTrackedOpens.Refusal.CHECK_FAILED;
         }
-        return true;
+        return null;
+    }
+
+    /** F7 (KL-168): how many NeoForge wrappers may hold one another in one slot before it is too many to check. */
+    static final int MAX_UNWRAP_DEPTH = 8;
+
+    /**
+     * F7 (KL-168): one menu's walk through its slots' storage. A wrapper already found to show no other block (one
+     * wrapper behind many slots) is not walked again; at most {@code MAX_MENU_DESCRIPTORS} wrappers are unwrapped per
+     * menu.
+     */
+    private static final class StorageWalk {
+        private final Inventory inventory;
+        private final Level level;
+        private final BlockPos pos;
+        private final WrapperFields fields;
+        private final Map<Object, Boolean> cleared = new IdentityHashMap<>();
+        private int unwrapped;
+
+        StorageWalk(Inventory inventory, Level level, BlockPos pos, WrapperFields fields) {
+            this.inventory = inventory;
+            this.level = level;
+            this.pos = pos;
+            this.fields = fields;
+        }
+
+        ItemsNotTrackedOpens.Refusal refusal(Object storage, int depth) throws ReflectiveOperationException {
+            if (storage == null || storage == inventory) return null;
+            if (storage instanceof CompoundContainer) return ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+            if (storage instanceof BlockEntity other) {
+                return other.getLevel() == level && pos.equals(other.getBlockPos())
+                        ? null
+                        : ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+            }
+            if (!(storage instanceof InvWrapper || storage instanceof SidedInvWrapper
+                    || storage instanceof RangedWrapper || storage instanceof CombinedInvWrapper)) {
+                return null;
+            }
+            if (cleared.containsKey(storage)) return null;
+            if (depth >= MAX_UNWRAP_DEPTH || ++unwrapped > MAX_MENU_DESCRIPTORS) {
+                return ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+            }
+            ItemsNotTrackedOpens.Refusal refusal = unwrap(storage, depth + 1);
+            if (refusal == null) cleared.put(storage, Boolean.TRUE);
+            return refusal;
+        }
+
+        private ItemsNotTrackedOpens.Refusal unwrap(Object wrapper, int depth) throws ReflectiveOperationException {
+            if (wrapper instanceof InvWrapper invWrapper) return refusal(invWrapper.getInv(), depth);
+            if (wrapper instanceof SidedInvWrapper) return refusalThrough(fields.sidedContainer(), wrapper, depth);
+            if (wrapper instanceof RangedWrapper) return refusalThrough(fields.rangedCompose(), wrapper, depth);
+            Field parts = fields.combinedParts();
+            if (parts == null || !(parts.get(wrapper) instanceof Object[] handlers)) {
+                return ItemsNotTrackedOpens.Refusal.CHECK_FAILED;
+            }
+            if (handlers.length > MAX_MENU_DESCRIPTORS) return ItemsNotTrackedOpens.Refusal.OTHER_BLOCK;
+            for (Object part : handlers) {
+                ItemsNotTrackedOpens.Refusal refusal = refusal(part, depth);
+                if (refusal != null) return refusal;
+            }
+            return null;
+        }
+
+        private ItemsNotTrackedOpens.Refusal refusalThrough(Field field, Object wrapper, int depth)
+                throws ReflectiveOperationException {
+            if (field == null) return ItemsNotTrackedOpens.Refusal.CHECK_FAILED;
+            return refusal(field.get(wrapper), depth);
+        }
     }
 
     /**
@@ -1118,7 +1306,7 @@ public final class UniversalContainerTracker {
     /**
      * True only when {@code slot} provably shows {@code inventory}: its container is that inventory, or it is a
      * {@link SlotItemHandler} over a handler {@link #wrapsInventory} proves. Nothing else proves it. A slot whose
-     * container is the player's inventory is trusted whatever the slot's class, as {@link #slotsShowOnlyThisBlock}
+     * container is the player's inventory is trusted whatever the slot's class, as {@link #slotStorageRefusal}
      * trusts it (review-01 NIT-3: vanilla's armor and offhand slots are such subclasses).
      */
     private static boolean isPlayersOwnInventorySlot(Slot slot, Inventory inventory, WrapperFields fields) {
@@ -1177,10 +1365,15 @@ public final class UniversalContainerTracker {
 
     /**
      * NeoForge's wrapper fields that have no getter: {@link CombinedInvWrapper}'s parts, {@link RangedWrapper}'s
-     * composed handler and {@link EntityEquipmentInvWrapper}'s entity. Each is null when it could not be opened
-     * (nothing is proven through it then).
+     * composed handler and {@link EntityEquipmentInvWrapper}'s entity; F7 (KL-168): and {@link SidedInvWrapper}'s
+     * container. Each is null when it could not be opened (nothing is proven through it then, and a slot the
+     * other-block check must read through it is CHECK_FAILED).
      */
-    record WrapperFields(Field combinedParts, Field rangedCompose, Field equipmentEntity) {
+    record WrapperFields(Field combinedParts, Field rangedCompose, Field equipmentEntity, Field sidedContainer) {
+        /** The three fields before F7; the sided container's field is then not opened. */
+        WrapperFields(Field combinedParts, Field rangedCompose, Field equipmentEntity) {
+            this(combinedParts, rangedCompose, equipmentEntity, null);
+        }
     }
 
     /** Test seam (review-01 MINOR-2): the fields the wrapper checks read instead of the opened ones; null restores. */
@@ -1198,9 +1391,10 @@ public final class UniversalContainerTracker {
     /** Opens each field once per JVM (this holder's initializer), so a field that failed warns once per JVM. */
     private static final class NeoForgeWrapperFields {
         static final WrapperFields OPENED = new WrapperFields(
-                openWrapperField(CombinedInvWrapper.class, "itemHandler", LOGGER::warn),
-                openWrapperField(RangedWrapper.class, "compose", LOGGER::warn),
-                openWrapperField(EntityEquipmentInvWrapper.class, "entity", LOGGER::warn));
+                openWrapperField(CombinedInvWrapper.class, "itemHandler", UNWRAP_FIELD_CONSEQUENCE, LOGGER::warn),
+                openWrapperField(RangedWrapper.class, "compose", UNWRAP_FIELD_CONSEQUENCE, LOGGER::warn),
+                openWrapperField(EntityEquipmentInvWrapper.class, "entity", LOGGER::warn),
+                openWrapperField(SidedInvWrapper.class, "inv", UNWRAP_FIELD_CONSEQUENCE, LOGGER::warn));
 
         private NeoForgeWrapperFields() {
         }
@@ -1212,6 +1406,22 @@ public final class UniversalContainerTracker {
      * throws short of a {@link VirtualMachineError}.
      */
     static Field openWrapperField(Class<?> owner, String name, Consumer<String> warn) {
+        return openWrapperField(owner, name, PLAYER_ONLY_FIELD_CONSEQUENCE, warn);
+    }
+
+    /** The WARN's consequence for a field only the player's-own-inventory proof reads (the entity field). */
+    static final String PLAYER_ONLY_FIELD_CONSEQUENCE = "a screen whose slots show the player's own inventory through"
+            + " that NeoForge wrapper keeps its \"items not tracked\" opened line";
+    /**
+     * F7 (KL-168): the WARN's consequence for a field the other-block check reads (the parts, composed handler and
+     * sided container fields). DRAFT TEXT for the Owner.
+     */
+    static final String UNWRAP_FIELD_CONSEQUENCE = "a screen with a slot shown through that NeoForge wrapper gets no"
+            + " \"items not tracked\" opened line, because it cannot be checked for another block's storage (counted"
+            + " as a check that could not be read)";
+
+    /** As {@link #openWrapperField(Class, String, Consumer)}, with the WARN's {@code consequence} (F7). */
+    static Field openWrapperField(Class<?> owner, String name, String consequence, Consumer<String> warn) {
         Field field = null;
         try {
             Field declared = owner.getDeclaredField(name);
@@ -1221,9 +1431,8 @@ public final class UniversalContainerTracker {
         }
         if (field == null) {
             try {
-                warn.accept("EventTrail could not open the field " + name + " of " + owner.getName() + "; a screen"
-                        + " whose slots show the player's own inventory through that NeoForge wrapper keeps its"
-                        + " \"items not tracked\" opened line");
+                warn.accept("EventTrail could not open the field " + name + " of " + owner.getName() + "; "
+                        + consequence);
             } catch (RuntimeException | LinkageError ignored) {
                 // Only a WARN; the holder's initializer never throws.
             }
@@ -1338,6 +1547,7 @@ public final class UniversalContainerTracker {
     public static void onPlayerLogout(UUID playerId) {
         SESSIONS.remove(playerId);
         RECENT_TARGETS.remove(playerId);
+        INPUT_TICKS.remove(playerId);
         NeoForgeContainerAccessAuditBridge.onPlayerLogout(playerId);
         ActionToken active = ACTIVE_AUTHORITATIVE_ACTION.get();
         if (active != null && active.playerId.equals(playerId)) {
@@ -1357,6 +1567,7 @@ public final class UniversalContainerTracker {
             if (SESSIONS.remove(id) != null) dropped++;
         }
         RECENT_TARGETS.clear();
+        INPUT_TICKS.clear();
         NeoForgeContainerAccessAuditBridge.clearRuntimeState();
         ActionToken active = ACTIVE_AUTHORITATIVE_ACTION.get();
         if (active != null) {
@@ -1408,6 +1619,9 @@ public final class UniversalContainerTracker {
             int clickedSlotIndex,
             ClickType clickType) {
         if (player == null || menu == null || !preparePlayerTracking(player)) return null;
+        // F7 (KL-168): a click in a screen is an input that can open another screen in this tick. Counted after the
+        // admission check above, so that check is not run (and a refusal counted) twice.
+        countAdmittedInput(player);
         Session session = SESSIONS.get(player.getUUID());
         if (session != null
                 && OptionalMenuAdapterLoader.isRuntimeAdapterDisabled(session.adapter.adapterId())) {
@@ -2631,20 +2845,116 @@ public final class UniversalContainerTracker {
      * line and is counted CHECK_FAILED (with that reason's WARN once per server start); an adapter keeps the target.
      */
     private static void markClickBeforeOtherHandlers(PlayerInteractEvent event) {
-        markClickBefore(event::getEntity);
+        markClickBefore(event::getEntity, true);
     }
 
-    private static void markClickBefore(Supplier<?> clicker) {
+    /**
+     * F7 (KL-168): {@code countsAsInput} also counts the event as one of the player's inputs in this server tick (a
+     * block click, either hand, an item use or an entity click); a failed count, like a failed mark, sets the click
+     * aside and leaves the count unread.
+     */
+    private static void markClickBefore(Supplier<?> clicker, boolean countsAsInput) {
         ServerPlayer actor = null;
         try {
             if (!(clicker.get() instanceof ServerPlayer player)) return;
             actor = player;
             if (player.level().isClientSide() || !preparePlayerTracking(player)) return;
             markItemUseAfterClick(player);
+            if (countsAsInput) countInput(player);
         } catch (VirtualMachineError fatal) {
             throw fatal;
         } catch (Throwable failure) {
             setAsideClick(actor);
+            if (countsAsInput) inputCountUnread(actor);
+        }
+    }
+
+    /**
+     * Own-slot "opened" line, F7 (KL-168): counts one input of this player in the current server tick (a click in a
+     * screen is counted in {@code captureMenuAction}, after its own admission check). A hook for an input that posts no event (a mod's own
+     * network packet, a key) can call it before that input runs. Any input counted in a click's tick besides that
+     * click refuses the screen that opens in the tick (OTHER_INPUT). It never throws short of a
+     * {@link VirtualMachineError}; a failed count sets the player's click aside as unreadable (CHECK_FAILED at the next
+     * open).
+     */
+    public static void noteScreenOpeningInput(ServerPlayer player) {
+        countInputBefore(() -> player);
+    }
+
+    /**
+     * F7: the HIGHEST input handlers' only work, behind the same checks as {@link #markClickBefore} (a server-side
+     * player that is tracked); nothing reaches the event short of a {@link VirtualMachineError}. m1 (ct-01 check-1,
+     * D-674): the admission is read without counting a refusal ({@link #countsInputsOf}); an input count admits
+     * nothing, so a refused player here is not one of the unlisted player refusals (a close is never refused).
+     */
+    private static void countInputBefore(Supplier<?> source) {
+        ServerPlayer actor = null;
+        try {
+            if (!(source.get() instanceof ServerPlayer player)) return;
+            actor = player;
+            if (player.level().isClientSide() || !countsInputsOf(player)) return;
+            countInput(player);
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable failure) {
+            setAsideClick(actor);
+            inputCountUnread(actor);
+        }
+    }
+
+    /**
+     * m1 (ct-01 check-1, D-674): the same players as {@link #preparePlayerTracking} (a tracked type, not a FakePlayer,
+     * the server's own listed object), read without adding to {@link NeoForgePlayerProvenance#unlistedPlayerRefusals}.
+     */
+    private static boolean countsInputsOf(ServerPlayer player) {
+        return trackedActorType(player) && !NeoForgePlayerProvenance.isSynthetic(player)
+                && NeoForgePlayerProvenance.isListedPlayer(player);
+    }
+
+    /** F7: as {@link #countInputBefore}, for a player the caller has already admitted (a click in a screen). */
+    private static void countAdmittedInput(ServerPlayer player) {
+        try {
+            countInput(player);
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable failure) {
+            setAsideClick(player);
+            inputCountUnread(player);
+        }
+    }
+
+    /** F7: one more input of this player in the current server tick (a new tick starts the count at one). */
+    private static void countInput(ServerPlayer player) {
+        long tick = currentTick(player);
+        INPUT_TICKS.compute(player.getUUID(), (id, last) -> last == null ? new InputTick(tick, 1) : last.next(tick));
+    }
+
+    /**
+     * F7: a count that failed. Its tick is unknown, so the player's next counted input starts at two in its tick (a
+     * click then is refused OTHER_INPUT), and a click whose own count failed finds no count for its tick
+     * (CHECK_FAILED).
+     */
+    private static void inputCountUnread(ServerPlayer actor) {
+        if (actor == null) return;
+        try {
+            INPUT_TICKS.put(actor.getUUID(), InputTick.UNREAD);
+        } catch (VirtualMachineError fatal) {
+            throw fatal;
+        } catch (Throwable ignored) {
+            // Nothing more can be done for this count; it never reaches the event.
+        }
+    }
+
+    /**
+     * F7 (KL-168): the server tick of a player's latest counted input and how many inputs it had, capped at two (only
+     * "one" or "more than one" is ever asked). {@link #UNREAD} is a failed count.
+     */
+    private record InputTick(long tick, int count) {
+        static final InputTick UNREAD = new InputTick(RecentTarget.NO_TICK, 2);
+
+        InputTick next(long now) {
+            if (tick == RecentTarget.NO_TICK) return new InputTick(now, 2);
+            return now == tick ? new InputTick(tick, 2) : new InputTick(now, 1);
         }
     }
 
