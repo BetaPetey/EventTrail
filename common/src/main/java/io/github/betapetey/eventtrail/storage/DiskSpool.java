@@ -145,16 +145,26 @@ final class DiskSpool {
      * the configured one on every server (Owner Q405 A); {@code waitingRoomBytes} is the waiting room's memory limit
      * ({@link #handOffByteLimit}), and {@code maxHeapBytes} the server's maximum heap that the startup check read (0
      * when none was read). When the waiting room is below {@link #handOffMaxBytes} of the cap, the startup check
-     * lowered it to fit the heap ({@link #fittedWaitingRoomBytes}).
+     * lowered it to fit the heap ({@link #fittedWaitingRoomBytes}). {@code collector} is the garbage collector the
+     * server runs, by its beans' names (Owner Q378 A), for the -Xmx advice ({@link #xmxMibAdvisedFor}).
      */
     record Settings(boolean enabled, long capBytes, int retentionDays, boolean deleteKeptAfterRetention,
                     SpoolFile.ConnectionFactory factory, LongSupplier clock, ToLongFunction<Path> usableSpace,
-                    OpenHook openHook, long waitingRoomBytes, long maxHeapBytes) {
+                    OpenHook openHook, long waitingRoomBytes, long maxHeapBytes, HeapCollector collector) {
         Settings {
             Objects.requireNonNull(factory, "factory");
             Objects.requireNonNull(clock, "clock");
             Objects.requireNonNull(usableSpace, "usableSpace");
             if (openHook == null) openHook = () -> {};
+            if (collector == null) collector = HeapCollector.UNKNOWN;
+        }
+
+        /** A heap read with no collector name: the advice keeps the unknown collector's safe margin. */
+        Settings(boolean enabled, long capBytes, int retentionDays, boolean deleteKeptAfterRetention,
+                 SpoolFile.ConnectionFactory factory, LongSupplier clock, ToLongFunction<Path> usableSpace,
+                 OpenHook openHook, long waitingRoomBytes, long maxHeapBytes) {
+            this(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, openHook,
+                    waitingRoomBytes, maxHeapBytes, HeapCollector.UNKNOWN);
         }
 
         /** The shape before Q367: the waiting room is the whole of the cap ({@link #handOffMaxBytes}), no heap read. */
@@ -165,32 +175,43 @@ final class DiskSpool {
                     handOffMaxBytes(capBytes), 0L);
         }
 
+        /**
+         * Owner Q378 A: what Java reports about itself only, its usable maximum memory ({@link Runtime#maxMemory()})
+         * and its collector's name ({@link HeapCollector#current()}); never the server's command-line arguments.
+         */
         static Settings production(boolean enabled, int maxMegabytes, int retentionDays) {
-            return production(enabled, maxMegabytes, retentionDays, Runtime.getRuntime().maxMemory());
+            return production(enabled, maxMegabytes, retentionDays, Runtime.getRuntime().maxMemory(),
+                    HeapCollector.current());
+        }
+
+        /** {@link #production(boolean, int, int, long, HeapCollector)} with no collector name (the safe margin). */
+        static Settings production(boolean enabled, int maxMegabytes, int retentionDays, long maxHeapBytes) {
+            return production(enabled, maxMegabytes, retentionDays, maxHeapBytes, HeapCollector.UNKNOWN);
         }
 
         /**
          * Owner Q405 A: the configured disk size, unchanged on every server, and the waiting room fitted at startup to
          * the heap ({@link #fittedWaitingRoomBytes}).
          */
-        static Settings production(boolean enabled, int maxMegabytes, int retentionDays, long maxHeapBytes) {
+        static Settings production(boolean enabled, int maxMegabytes, int retentionDays, long maxHeapBytes,
+                                   HeapCollector collector) {
             long configured = Math.max(1L, maxMegabytes) * MIB;
             return new Settings(enabled, configured, retentionDays,
                     SpoolFile.DELETE_KEPT_AFTER_RETENTION, SpoolFile.ConnectionFactory.bundled(),
                     System::currentTimeMillis, DiskSpool::usableSpace, null,
-                    fittedWaitingRoomBytes(configured, maxHeapBytes), maxHeapBytes);
+                    fittedWaitingRoomBytes(configured, maxHeapBytes), maxHeapBytes, collector);
         }
 
         /** Owner Q405 A: true when the startup check lowered the waiting room below the whole of the cap. */
         boolean waitingRoomLowered() { return waitingRoomBytes < handOffMaxBytes(capBytes); }
 
-        Settings withClock(LongSupplier c) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, c, usableSpace, openHook, waitingRoomBytes, maxHeapBytes); }
-        Settings withUsableSpace(ToLongFunction<Path> u) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, u, openHook, waitingRoomBytes, maxHeapBytes); }
-        Settings withOpenHook(OpenHook h) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, h, waitingRoomBytes, maxHeapBytes); }
-        Settings withFactory(SpoolFile.ConnectionFactory f) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, f, clock, usableSpace, openHook, waitingRoomBytes, maxHeapBytes); }
-        Settings withDeleteKept(boolean d) { return new Settings(enabled, capBytes, retentionDays, d, factory, clock, usableSpace, openHook, waitingRoomBytes, maxHeapBytes); }
+        Settings withClock(LongSupplier c) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, c, usableSpace, openHook, waitingRoomBytes, maxHeapBytes, collector); }
+        Settings withUsableSpace(ToLongFunction<Path> u) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, u, openHook, waitingRoomBytes, maxHeapBytes, collector); }
+        Settings withOpenHook(OpenHook h) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, h, waitingRoomBytes, maxHeapBytes, collector); }
+        Settings withFactory(SpoolFile.ConnectionFactory f) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, f, clock, usableSpace, openHook, waitingRoomBytes, maxHeapBytes, collector); }
+        Settings withDeleteKept(boolean d) { return new Settings(enabled, capBytes, retentionDays, d, factory, clock, usableSpace, openHook, waitingRoomBytes, maxHeapBytes, collector); }
         /** Test helper: the same settings with the waiting room's memory limit set to {@code w}. */
-        Settings withWaitingRoom(long w) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, openHook, w, maxHeapBytes); }
+        Settings withWaitingRoom(long w) { return new Settings(enabled, capBytes, retentionDays, deleteKeptAfterRetention, factory, clock, usableSpace, openHook, w, maxHeapBytes, collector); }
     }
 
     // ---- Q367 A, as Owner Q405 A rewrote it: the startup memory check fits the waiting room, not the disk ----------
@@ -276,9 +297,37 @@ final class DiskSpool {
     }
 
     /**
+     * The -Xmx advice is a whole number of these steps (256 MiB), so it is easy to set. This rounding is the build's
+     * choice, not the Owner's: on collectors that report the whole heap it can name up to 255 MiB more than needed.
+     */
+    static final long XMX_ADVICE_STEP_MIB = 256L;
+
+    /**
+     * Owner Q378 A: the -Xmx, in MiB, that the startup WARN advises for a spool of {@code capBytes} on a server running
+     * {@code collector}: the least whole {@link #XMX_ADVICE_STEP_MIB} step at which the collector's usable maximum memory
+     * ({@link HeapCollector#leastMaxMemoryAt}, what {@link Runtime#maxMemory()} reports for that -Xmx) passes the same
+     * startup check unlowered ({@link #fittedWaitingRoomBytes}). Today's {@link #heapMibNeededFor} is usable memory, not
+     * -Xmx: Parallel and Serial report less than their -Xmx, so setting -Xmx to it alone could keep the WARN. The check
+     * and its threshold are unchanged; only the advised figure is.
+     */
+    static long xmxMibAdvisedFor(long capBytes, HeapCollector collector) {
+        HeapCollector c = collector == null ? HeapCollector.UNKNOWN : collector;
+        long whole = handOffMaxBytes(capBytes);
+        long step = XMX_ADVICE_STEP_MIB;
+        // Start one step below the first step at or above the -Xmx whose usable memory is the needed heap (the needed
+        // heap is rounded up to a whole MiB, so the check can pass a little below it), then take the first step that
+        // passes; the loop runs a step or two.
+        long first = (c.leastXmxMibReporting(heapMibNeededFor(capBytes)) + step - 1L) / step * step;
+        long xmxMib = Math.max(step, first - step);
+        while (fittedWaitingRoomBytes(capBytes, c.leastMaxMemoryAt(xmxMib * MIB)) < whole) xmxMib += step;
+        return xmxMib;
+    }
+
+    /**
      * Owner Q405 A: the startup WARN when the waiting room was lowered to fit the heap; null when it was not. The
      * Owner's admin-facing text (Q412 A, owner-texts-q405.md item a). Owner Q420 A: its "dropped only when" sentence
-     * names all three drop cases, with this WARN's own waiting-room figure.
+     * names all three drop cases, with this WARN's own waiting-room figure. Owner Q378 A: the -Xmx it names is
+     * {@link #xmxMibAdvisedFor} for the server's collector, so following it clears this WARN.
      */
     static String waitingRoomLoweredWarn(Settings settings) {
         if (!settings.waitingRoomLowered()) return null;
@@ -290,7 +339,7 @@ final class DiskSpool {
                 + " Actions are dropped only when the disk spool is full, when the drive it is on has less than "
                 + FLOOR_BYTES / MIB + " MiB free, or when they arrive faster than the disk can take them for long"
                 + " enough to fill those " + room + " MiB. To set aside the full " + cap + " MiB, give the server at least "
-                + heapMibNeededFor(settings.capBytes()) + " MiB (-Xmx).";
+                + xmxMibAdvisedFor(settings.capBytes(), settings.collector()) + " MiB (-Xmx).";
     }
 
     /**
