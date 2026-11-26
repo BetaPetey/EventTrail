@@ -1761,9 +1761,8 @@ public final class ExtendedLookup {
     /**
      * The line shown when a lookup with a block:, item:, entity: or mod: filter finds nothing (Owner 11-22
      * 5:12 AM item 8; mock text): {@code No match for item:diamond. Hover names for IDs.} Null when the base
-     * query has no such filter. NOT YET SHOWN: the line points at the name hovers, which the held presentation
-     * track builds, so the render call joins with that track; it calls {@link #noMatchLines}, which adds G16's
-     * "not installed" lines.
+     * query has no such filter. The line points at the name hovers of the Design B rows; the lookup render shows it
+     * through {@link #noMatchLines}, which adds G16's "not installed" lines.
      */
     static String noMatchLine(String baseQuery) {
         if (baseQuery == null) return null;
@@ -1832,23 +1831,39 @@ public final class ExtendedLookup {
         beginTeleportResultPage(player.getUUID(), System.currentTimeMillis());
         PageWindow<AuditRecord> page = PageWindow.fromPage(
                 result.entries(), result.total(), result.page(), session.perPage());
+        // Design B header: "N results · Query: N ms", then the filter line from the search's own tokens (its click
+        // puts the search back in the chat box) with " in <world>" for a radius search. The rows' coordinate hovers
+        // name the dimension only for a global lookup, where no line on screen names it.
         LookupSummaryView summary = new LookupSummaryView(
                 result.total(),
                 session.scope() == Scope.RADIUS ? session.radius() : null,
                 session.timeLabel(),
-                session.scope() == Scope.GLOBAL ? "All dimensions" : session.world(),
-                result.elapsedMs());
+                session.scope() == Scope.GLOBAL ? LookupSummaryView.ALL_DIMENSIONS : session.world(),
+                result.elapsedMs(),
+                session.baseQuery(),
+                session.scope() == Scope.RADIUS ? session.world() : null);
         LookupResultsView view = ENTRY_PRESENTER.lookup(
                 summary,
                 page,
                 session.scope() == Scope.GLOBAL,
-                record -> createNavigationTarget(
-                        player.getUUID(), record, System.currentTimeMillis()),
+                lookupNavigationTargets(player.getUUID(), canRunTeleportLinks(player.createCommandSourceStack())),
                 result.verdicts());
-        RESULTS_RENDERER.render(view).forEach(player::sendSystemMessage);
+        // The Owner's two lines (Q248 A): only when nothing is found, in the rows' place inside the Design B frame.
+        List<String> noMatch = result.total() == 0L && view.rows().isEmpty()
+                ? noMatchLines(session.baseQuery(), installedModIds()) : List.of();
+        RESULTS_RENDERER.render(view, noMatch).forEach(player::sendSystemMessage);
         if (result.total() == 0L) {
             InvestigationSessions.REGISTRY.revokeLookup(player.getUUID());
         }
+    }
+
+    /**
+     * A lookup page's row links: a teleport link per row only for a viewer who can run one ({@link
+     * #canRunTeleportLinks}), else none, so no row gets a teleport click or hover that would be refused.
+     */
+    static AuditEntryPresenter.NavigationTargetFactory lookupNavigationTargets(UUID viewerId, boolean teleportLinks) {
+        if (!teleportLinks) return record -> java.util.Optional.empty();
+        return record -> createNavigationTarget(viewerId, record, System.currentTimeMillis());
     }
 
     static java.util.Optional<String> createNavigationTarget(
@@ -1864,6 +1879,32 @@ public final class ExtendedLookup {
                 record.location().dimensionId().toString(),
                 position.getX(), position.getY(), position.getZ(),
                 now));
+    }
+
+    /**
+     * Inspect's "@ x y z" teleport (Owner 8:15 PM 11-22): the same private link as a lookup row's coordinates, so the
+     * same {@link #handleTeleportLink} permission check runs when it is clicked. It joins the viewer's current links
+     * (capped and expiring as lookup's) without starting a new result page.
+     */
+    static java.util.Optional<String> createPositionTarget(
+            UUID viewerId, net.minecraft.resources.ResourceLocation dimensionId, BlockPos position, long now) {
+        if (viewerId == null || dimensionId == null || position == null) return java.util.Optional.empty();
+        return java.util.Optional.of(createTeleportCommand(
+                viewerId, dimensionId.toString(), position.getX(), position.getY(), position.getZ(), now));
+    }
+
+    /**
+     * Whether a teleport link can reach {@link #handleTeleportLink} and teleport this viewer: the link runs
+     * "/eventtrail lookup <token>", which Brigadier offers only with the lookup permission, and the teleport itself
+     * needs the teleport permission. Lookup rows and inspect's "@ x y z" get a click only then, so no viewer gets a
+     * click that cannot run.
+     */
+    static boolean canRunTeleportLinks(CommandSourceStack source) {
+        return source != null && canRunTeleportLinks(node -> EventTrailPermissions.hasExactPermission(source, node));
+    }
+
+    static boolean canRunTeleportLinks(Predicate<String> permissionCheck) {
+        return permissionCheck.test(LOOKUP_PERMISSION) && hasTeleportPermission(permissionCheck);
     }
 
     private static int handleTeleportLink(CommandSourceStack source, ServerPlayer player, String query) {

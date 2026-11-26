@@ -9,6 +9,7 @@ import io.github.betapetey.eventtrail.audit.AuditRecord;
 import io.github.betapetey.eventtrail.commands.presentation.AuditActionPresentationCatalog;
 import io.github.betapetey.eventtrail.commands.presentation.AuditEntryPresenter;
 import io.github.betapetey.eventtrail.commands.presentation.AuditResultsComponentRenderer;
+import io.github.betapetey.eventtrail.commands.presentation.InspectResultsView;
 import io.github.betapetey.eventtrail.commands.presentation.RelativeAgeFormatter;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
 import io.github.betapetey.eventtrail.events.location.AuditBlockLocations;
@@ -177,11 +178,20 @@ public final class InspectCommand {
             source.sendFailure(Component.literal("§c" + EventTrailAvailabilityMessages.unavailable(source)));
             return 0;
         }
-        ExtendedLookup.clearTeleportLinks(player.getUUID());
+        afterToggle(player.getUUID(), result);
         source.sendSuccess(() -> result == InspectUseCase.ToggleResult.ENABLED
                 ? Component.literal("§aInspect mode enabled. §7Right-click a block to view its history.")
                 : Component.literal("§7Inspect mode disabled."), false);
         return 1;
+    }
+
+    /**
+     * Turning inspect on clears the viewer's teleport links, as before; turning it off keeps them, so
+     * inspect's "@ x y z" link lives as long as lookup's row links do: until the viewer's next lookup page clears
+     * them, or the per-viewer cap or expiry drops them.
+     */
+    static void afterToggle(UUID playerId, InspectUseCase.ToggleResult result) {
+        if (result == InspectUseCase.ToggleResult.ENABLED) ExtendedLookup.clearTeleportLinks(playerId);
     }
 
     static int goToInspectPage(CommandContext<CommandSourceStack> context) {
@@ -216,7 +226,7 @@ public final class InspectCommand {
             ServerPlayer player,
             InspectUseCase.Completion completion) {
         if (completion.hasPage()) {
-            RENDERER.renderInspect(completion.view()).forEach(player::sendSystemMessage);
+            RENDERER.renderInspect(withTeleport(player, completion.view())).forEach(player::sendSystemMessage);
         } else if (completion.status() == InspectUseCase.CompletionStatus.EMPTY) {
             player.sendSystemMessage(Component.literal(
                     "§7No EventTrail history exists at that block."));
@@ -232,7 +242,7 @@ public final class InspectCommand {
             int requested,
             InspectUseCase.Completion completion) {
         if (completion.hasPage()) {
-            RENDERER.renderInspect(completion.view()).forEach(player::sendSystemMessage);
+            RENDERER.renderInspect(withTeleport(player, completion.view())).forEach(player::sendSystemMessage);
             return 1;
         }
         if (completion.status() == InspectUseCase.CompletionStatus.PERMISSION_DENIED) {
@@ -245,6 +255,16 @@ public final class InspectCommand {
                     "§cNo results to page through. Run a lookup or inspect first."));
         }
         return 0;
+    }
+
+    /**
+     * Inspect's "@ x y z" teleports by the same private link as lookup's coordinates, so clicking it runs the same
+     * permission check (Owner 8:15 PM 11-22). Each shown page gets its own link.
+     */
+    private static InspectResultsView withTeleport(ServerPlayer player, InspectResultsView view) {
+        if (!ExtendedLookup.canRunTeleportLinks(player.createCommandSourceStack())) return view;
+        return view.withPositionCommand(ExtendedLookup.createPositionTarget(
+                player.getUUID(), view.dimensionId(), view.position(), System.currentTimeMillis()));
     }
 
     static boolean revalidateInspectState(UUID playerId, boolean permitted) {

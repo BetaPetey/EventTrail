@@ -6,14 +6,17 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
-/** Formats audit ages against an injected clock with a data-driven unit catalog. */
+/**
+ * Formats audit ages against an injected clock: one unit and no " ago", as the Owner's row example "39s BetaPetey
+ * broke Grass Block 14 63 25" shows (39s, 2m, 1h, 3d, 2w). The exact time is in the row's time hover.
+ */
 public final class RelativeAgeFormatter {
     private static final List<AgeBand> BANDS = List.of(
-            new AgeBand(60L, 1L, "s", 0L, ""),
-            new AgeBand(60L * 60L, 60L, "m", 0L, ""),
-            new AgeBand(24L * 60L * 60L, 60L * 60L, "h", 60L, "m"),
-            new AgeBand(7L * 24L * 60L * 60L, 24L * 60L * 60L, "d", 60L * 60L, "h"),
-            new AgeBand(Long.MAX_VALUE, 7L * 24L * 60L * 60L, "w", 24L * 60L * 60L, "d"));
+            new AgeBand(60L, 1L, "s"),
+            new AgeBand(60L * 60L, 60L, "m"),
+            new AgeBand(24L * 60L * 60L, 60L * 60L, "h"),
+            new AgeBand(7L * 24L * 60L * 60L, 24L * 60L * 60L, "d"),
+            new AgeBand(Long.MAX_VALUE, 7L * 24L * 60L * 60L, "w"));
 
     private final Clock clock;
 
@@ -36,25 +39,9 @@ public final class RelativeAgeFormatter {
         return band.format(age);
     }
 
-    private record AgeBand(
-            long upperExclusiveSeconds,
-            long primarySeconds,
-            String primarySuffix,
-            long secondarySeconds,
-            String secondarySuffix) {
-
+    private record AgeBand(long upperExclusiveSeconds, long unitSeconds, String suffix) {
         private String format(long ageSeconds) {
-            long primary = ageSeconds / primarySeconds;
-            StringBuilder result = new StringBuilder()
-                    .append(primary)
-                    .append(primarySuffix);
-            if (secondarySeconds > 0L) {
-                long secondary = (ageSeconds % primarySeconds) / secondarySeconds;
-                if (secondary > 0L) {
-                    result.append(' ').append(secondary).append(secondarySuffix);
-                }
-            }
-            return result.append(" ago").toString();
+            return (ageSeconds / unitSeconds) + suffix;
         }
     }
 }

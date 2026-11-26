@@ -80,6 +80,8 @@ final class InspectUseCase {
             PositionHistoryQuery query,
             ExplosionVerdicts.PartReader reader,
             IdMark mark) {
+        // "Query: N ms" (Owner 8:15 PM 11-22): the id mark, the rows and the verdicts, as lookup times its query.
+        long started = System.nanoTime();
         Long idMark = null;
         if (reader != null && mark != null) {
             try {
@@ -93,7 +95,8 @@ final class InspectUseCase {
         ExplosionVerdicts verdicts = idMark == null
                 ? ExplosionVerdicts.none()
                 : ExplosionVerdicts.read(records, reader, idMark);
-        return new InspectRows(records, verdicts);
+        long queryMillis = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
+        return new InspectRows(records, verdicts, queryMillis);
     }
 
     Completion complete(
@@ -102,7 +105,7 @@ final class InspectUseCase {
             boolean permitted,
             int perPage) {
         Objects.requireNonNull(rows, "rows");
-        return complete(request, rows.records(), rows.verdicts(), permitted, perPage);
+        return complete(request, rows.records(), rows.verdicts(), rows.queryMillis(), permitted, perPage);
     }
 
     Completion complete(
@@ -110,13 +113,14 @@ final class InspectUseCase {
             List<AuditRecord> records,
             boolean permitted,
             int perPage) {
-        return complete(request, records, ExplosionVerdicts.none(), permitted, perPage);
+        return complete(request, records, ExplosionVerdicts.none(), 0L, permitted, perPage);
     }
 
     private Completion complete(
             QueryRequest request,
             List<AuditRecord> records,
             ExplosionVerdicts verdicts,
+            long queryMillis,
             boolean permitted,
             int perPage) {
         QueryRequest current = requireRequest(request);
@@ -131,10 +135,11 @@ final class InspectUseCase {
             return Completion.failure(CompletionStatus.EMPTY);
         }
         InspectSnapshot snapshot = new InspectSnapshot(
-                current.dimensionId(), current.position(), snapshotRows, verdicts);
+                current.dimensionId(), current.position(), snapshotRows, verdicts, queryMillis);
         if (!sessions.publishInspect(current.transition(), snapshot)) return Completion.stale();
         return Completion.page(presenter.inspect(
-                snapshot.dimensionId(), snapshot.position(), snapshot.records(), 1, perPage, snapshot.verdicts()));
+                snapshot.dimensionId(), snapshot.position(), snapshot.records(), 1, perPage, snapshot.verdicts(),
+                snapshot.queryMillis()));
     }
 
     Completion page(UUID playerId, int requestedPage, boolean permitted, int perPage) {
@@ -150,7 +155,7 @@ final class InspectUseCase {
         try {
             return Completion.page(presenter.inspect(
                     snapshot.dimensionId(), snapshot.position(), snapshot.records(),
-                    requestedPage, perPage, snapshot.verdicts()));
+                    requestedPage, perPage, snapshot.verdicts(), snapshot.queryMillis()));
         } catch (IllegalArgumentException invalidPage) {
             return Completion.failure(CompletionStatus.INVALID_PAGE);
         }
@@ -181,11 +186,16 @@ final class InspectUseCase {
         long capture() throws Exception;
     }
 
-    /** The inspect rows and the verdicts read with them. */
-    record InspectRows(List<AuditRecord> records, ExplosionVerdicts verdicts) {
+    /** The inspect rows, the verdicts read with them, and the query's time in ms. */
+    record InspectRows(List<AuditRecord> records, ExplosionVerdicts verdicts, long queryMillis) {
         InspectRows {
             records = List.copyOf(records);
             verdicts = Objects.requireNonNull(verdicts, "verdicts");
+            if (queryMillis < 0L) throw new IllegalArgumentException("queryMillis cannot be negative");
+        }
+
+        InspectRows(List<AuditRecord> records, ExplosionVerdicts verdicts) {
+            this(records, verdicts, 0L);
         }
     }
 
@@ -200,16 +210,27 @@ final class InspectUseCase {
         }
     }
 
+    /** The published inspect history; {@code queryMillis} is the first query's time, shown on every page. */
     record InspectSnapshot(
             ResourceLocation dimensionId,
             BlockPos position,
             List<AuditRecord> records,
-            ExplosionVerdicts verdicts) {
+            ExplosionVerdicts verdicts,
+            long queryMillis) {
         InspectSnapshot {
             dimensionId = Objects.requireNonNull(dimensionId, "dimensionId");
             position = Objects.requireNonNull(position, "position").immutable();
             records = List.copyOf(records);
             verdicts = Objects.requireNonNull(verdicts, "verdicts");
+            if (queryMillis < 0L) throw new IllegalArgumentException("queryMillis cannot be negative");
+        }
+
+        InspectSnapshot(
+                ResourceLocation dimensionId,
+                BlockPos position,
+                List<AuditRecord> records,
+                ExplosionVerdicts verdicts) {
+            this(dimensionId, position, records, verdicts, 0L);
         }
 
         /** A snapshot without verdicts: every row of an explosion stored in parts reads "not checked". */

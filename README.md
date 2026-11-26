@@ -76,17 +76,18 @@ ANDed.
 
 The actions are `break`, `place`, `container_open`, `container_closed`, `container_deposit`,
 `container_withdrawal`, `kill`, `death`, `drop`, `pickup` and `explosion`. Leaving out `action:` matches every
-action. Deposits and withdrawals are shown as **Added Item** and **Removed Item**.
+action. Deposits and withdrawals are shown as **added** and **took** rows, for example "added 7× Diamond to Chest" and "took 7× Diamond from Chest".
 
 `block:` matches the block of break, place and explosion rows, and a name in quotes also matches the container of
 open, close, deposit and withdrawal rows by the name it was logged with. `item:` matches the item of drop, pickup,
-deposit and withdrawal rows and the weapon of a kill. `entity:` matches the victim, the killer or the "via" entity of
-kill and death rows. Each takes one value or a comma list:
+deposit and withdrawal rows and the weapon of a kill or death. `entity:` matches the victim, the killer or the "via"
+entity of kill and death rows. Each takes one value or a comma list:
 
 - an ID without quotes is exact: `minecraft:oak_log` is that ID only, and `oak_log` is that ID in any mod, so it
   never finds `minecraft:stripped_oak_log`;
 - a name in `"..."` or `'...'` is the whole name, ignoring case: the thing's normal name or the name it was logged
-  with, custom names included, so `item:"Diamond"` also finds dirt renamed "Diamond";
+  with, custom names included, so `item:"Diamond"` also finds dirt renamed "Diamond"; on deposit, withdrawal, kill
+  and death rows a quoted name matches the item's normal name only, not an anvil name;
 - `*` is the only wildcard, in IDs and names: `block:*_log`, `item:"diamond*"`.
 
 `mod:` takes mod IDs (lowercase, as the mod names itself, with `minecraft` for the game) and matches an entry when
@@ -99,11 +100,11 @@ mod IDs. `name:` was removed; use `block:`, `item:` or `entity:` with the name i
 /eventtrail lookup global time:30m action:break per-page:50
 /eventtrail lookup radius:25 time:4h block:minecraft:oak_log,birch_log
 /eventtrail lookup radius:50 time:1d action:break,place block:"Oak Iron Chest"
-/eventtrail lookup global time:1h item:"Lucky Pick" mod:minecraft
+/eventtrail lookup global time:1h item:"Diamond Sword" mod:minecraft
 /eventtrail lookup global time:1h action:container_deposit,container_withdrawal
 ```
 
-Coordinates in lookup results can be clicked to teleport, for players with `command.eventtrail.teleport`. The link
+Coordinates in lookup and inspect results can be clicked to teleport, for players with `command.eventtrail.teleport`; other players see no link. The link
 is short-lived and bound to the player who received it.
 
 ## Permissions

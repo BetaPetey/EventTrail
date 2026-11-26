@@ -27,6 +27,7 @@ public final class AuditActionPresentationCatalog {
     public static final String CLOSE_TRASH = "Close Trash";
 
     private final Map<AuditAction, String> labels;
+    private final Map<AuditAction, AuditRowView.Verb> verbs;
 
     public AuditActionPresentationCatalog() {
         EnumMap<AuditAction, String> configured = new EnumMap<>(AuditAction.class);
@@ -44,6 +45,22 @@ public final class AuditActionPresentationCatalog {
             throw new IllegalStateException("Every EventTrail action requires a presentation label");
         }
         labels = Map.copyOf(configured);
+
+        EnumMap<AuditAction, AuditRowView.Verb> rowVerbs = new EnumMap<>(AuditAction.class);
+        rowVerbs.put(AuditAction.BLOCK_BREAK, new AuditRowView.Verb("broke", AuditRowView.Tone.RED));
+        rowVerbs.put(AuditAction.BLOCK_PLACE, new AuditRowView.Verb("placed", AuditRowView.Tone.GREEN));
+        rowVerbs.put(AuditAction.CONTAINER_ACCESS, new AuditRowView.Verb("accessed", AuditRowView.Tone.GRAY));
+        rowVerbs.put(AuditAction.CONTAINER_DEPOSIT, new AuditRowView.Verb("added", AuditRowView.Tone.YELLOW));
+        rowVerbs.put(AuditAction.CONTAINER_WITHDRAWAL, new AuditRowView.Verb("took", AuditRowView.Tone.GOLD));
+        rowVerbs.put(AuditAction.ENTITY_KILL, new AuditRowView.Verb("killed", AuditRowView.Tone.SKY_BLUE));
+        rowVerbs.put(AuditAction.ENTITY_DEATH, new AuditRowView.Verb("died", AuditRowView.Tone.SKY_BLUE));
+        rowVerbs.put(AuditAction.ITEM_DROP, new AuditRowView.Verb("dropped", AuditRowView.Tone.DARK_AQUA));
+        rowVerbs.put(AuditAction.ITEM_PICKUP, new AuditRowView.Verb("picked up", AuditRowView.Tone.DARK_AQUA));
+        rowVerbs.put(AuditAction.EXPLOSION, new AuditRowView.Verb("blew up", AuditRowView.Tone.RED));
+        if (rowVerbs.size() != AuditAction.catalog().size()) {
+            throw new IllegalStateException("Every EventTrail action requires a row verb");
+        }
+        verbs = Map.copyOf(rowVerbs);
     }
 
     public String label(AuditRecord record) {
@@ -71,6 +88,50 @@ public final class AuditActionPresentationCatalog {
         String label = labels.get(Objects.requireNonNull(action, "action"));
         if (label == null) throw new IllegalArgumentException("Unsupported EventTrail action");
         return label;
+    }
+
+    /**
+     * The row's lower-case action word and colour (Design B, design03.py VERB; Q214: took gold, killed sky blue). The
+     * words the Owner's pictures did not show are lead calls (plan G4): closed, accessed, died, blew up, and "put" for
+     * an item put into a trash (the row adds the " (trash)" note, so it never reads as destroyed).
+     */
+    public AuditRowView.Verb verb(AuditRecord record) {
+        Objects.requireNonNull(record, "record");
+        if (record.evidence() instanceof AuditEvidence.ContainerAccess access) {
+            return access.phase() == AuditEvidence.AccessPhase.OPEN
+                    ? new AuditRowView.Verb("opened", AuditRowView.Tone.GRAY)
+                    : new AuditRowView.Verb("closed", AuditRowView.Tone.GRAY);
+        }
+        if (record.evidence() instanceof AuditEvidence.ContainerTransfer transfer
+                && record.action() == AuditAction.CONTAINER_DEPOSIT
+                && trashTransfer(record.action(), transfer)) {
+            return new AuditRowView.Verb("put", AuditRowView.Tone.YELLOW);
+        }
+        return verb(record.action());
+    }
+
+    public AuditRowView.Verb verb(AuditAction action) {
+        AuditRowView.Verb verb = verbs.get(Objects.requireNonNull(action, "action"));
+        if (verb == null) throw new IllegalArgumentException("Unsupported EventTrail action");
+        return verb;
+    }
+
+    /** GF-TRASHTARGET: whether the row is a trash target's row (its text gets the " (trash)" note). */
+    public boolean trashRow(AuditRecord record) {
+        Objects.requireNonNull(record, "record");
+        if (record.evidence() instanceof AuditEvidence.ContainerAccess access) {
+            return ContainerAccessPayloadCodec.trashTarget(access.encodedPayload());
+        }
+        return record.evidence() instanceof AuditEvidence.ContainerTransfer transfer
+                && trashTransfer(record.action(), transfer);
+    }
+
+    /** Own-slot screens: whether an access row's screen records no item moves. */
+    public boolean itemsNotTracked(AuditRecord record) {
+        Objects.requireNonNull(record, "record");
+        return record.evidence() instanceof AuditEvidence.ContainerAccess access
+                && !ContainerAccessPayloadCodec.trashTarget(access.encodedPayload())
+                && ContainerAccessPayloadCodec.itemsNotTracked(access.encodedPayload());
     }
 
     /**
