@@ -44,7 +44,9 @@ import net.p3pp3rf1y.sophisticatedstorageinmotion.network.RequestMovingStorageIn
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
@@ -67,8 +69,8 @@ import java.util.function.Supplier;
  * it is recorded, the storage opens normally for the player, and one warning per server start says so
  * ({@link SophisticatedLinkedStorage}). Mixed markers stay OFF, never an older path. r2: the same refusal, with its
  * own reason, when the opened storage is not the cart's own ({@code ownStorageRefused}); and, until Sophisticated
- * part 1's upgrade policy lands, CURRENT records only an iron chest with no upgrade, as LINKED_CORE
- * ({@code kindRefused}). r3: on every path, a per-object check that refuses a capture is counted with one warning per
+ * part 1's upgrade policy lands, CURRENT records only the plain chests and barrels with no upgrade
+ * ({@code kindRefused}; MOTION-KINDS widened it from the iron chest alone). r3: on every path, a per-object check that refuses a capture is counted with one warning per
  * server start per reason ({@code OBJECT_SITE}); it still gives no row. motion-02: LINKED_CORE's own restriction
  * (an unlinked plain iron chest minecart only) is counted and named too, with the kind reason
  * ({@code currentCoreHostSupported}); it was silent at match.</p>
@@ -103,8 +105,8 @@ public final class StorageInMotionMenuAdapter implements MenuTransactionAdapter 
      */
     static final String KIND_SITE = "adapter:StorageInMotionMenuAdapter.kind";
     /**
-     * The warning's reason: only an iron chest with no upgrades is recorded on CURRENT for now; on LINKED_CORE only an
-     * unlinked plain iron chest minecart (motion-02).
+     * The warning's reason: only the plain chests and barrels at default counts with no upgrades are recorded on
+     * CURRENT for now; on LINKED_CORE only an unlinked plain iron chest minecart (motion-02).
      */
     static final String KIND_REASON = "storage-kind-or-upgrades-not-recorded-yet";
     /**
@@ -383,8 +385,9 @@ public final class StorageInMotionMenuAdapter implements MenuTransactionAdapter 
      * so nothing in that open is recorded and the generic logger does not take it; the storage still opens normally
      * for the player), each with one warning per server start and every later refusal counted: a linked one
      * ({@link #linkedRefused}); one whose opened storage is not the cart's own ({@link #ownStorageRefused}, r2); and,
-     * until Sophisticated part 1's upgrade policy lands, any storage kind or upgrade set but an iron chest with no
-     * upgrades ({@link #kindRefused}, r2, the LINKED_CORE restriction). Read at every match, so a cart linked or
+     * until Sophisticated part 1's upgrade policy lands, any storage kind or upgrade set but the exact current kind
+     * table: a plain chest or barrel at default counts with no upgrades ({@link #kindRefused}, as at the
+     * LINKED_CORE restriction below). Read at every match, so a cart linked or
      * changed while its menu is open is refused at the next capture. Never throws.
      */
     static AdapterMatch matchCurrent(CurrentContract contract, MovingStorageContainerMenu<?> menu) {
@@ -415,10 +418,12 @@ public final class StorageInMotionMenuAdapter implements MenuTransactionAdapter 
     }
 
     /**
-     * Build B motion-01 r2 (lead's decision 4): CURRENT records only what LINKED_CORE records, an iron chest of 54 cells
-     * and 2 upgrade slots with no upgrade installed, in the plain menu (carts and boats both: the Owner's decision names
+     * Build B motion-01 r2 (lead's decision 4), widened by MOTION-KINDS (KL-71): CURRENT records the plain chests and
+     * barrels of Motion 0.10.38.395 (wood, copper, iron, gold, diamond and netherite, each at Storage's default cell and
+     * upgrade slot counts) with no upgrade installed, in the plain menu (carts and boats both: the Owner's decision names
      * both), until Sophisticated part 1's upgrade policy lands; Motion CURRENT and LEGACY then switch to part 1's
-     * allowlist in a later integration step. Anything else is refused with its own reason ({@link #KIND_REASON}), one
+     * allowlist in a later integration step. Anything else (an installed upgrade, a limited barrel, a shulker box, other
+     * counts, an unknown kind) is refused with its own reason ({@link #KIND_REASON}), one
      * warning per server start, every later refusal counted; never a row. A read that fails is reported and refuses
      * that open. Never throws.
      */
@@ -439,9 +444,9 @@ public final class StorageInMotionMenuAdapter implements MenuTransactionAdapter 
             for (int slot = 0; emptyUpgrades && slot < upgrades.getSlots(); slot++) {
                 emptyUpgrades = upgrades.getStackInSlot(slot).isEmpty();
             }
-            admitted = stack != null && !stack.isEmpty() && stack.getItem().getClass() == ChestBlockItem.class
-                    && inventory != null && upgrades != null
-                    && currentKindAdmitted(menu.getClass(), BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(),
+            admitted = stack != null && !stack.isEmpty() && inventory != null && upgrades != null
+                    && currentKindAdmitted(menu.getClass(), stack.getItem().getClass(),
+                            BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(),
                             inventory.getSlots(), upgrades.getSlots(), emptyUpgrades);
         } catch (RuntimeException | LinkageError failure) {
             AdapterFailSafe.report(AdapterKey.STORAGE_IN_MOTION, KIND_SITE, failure);
@@ -451,11 +456,38 @@ public final class StorageInMotionMenuAdapter implements MenuTransactionAdapter 
         return !admitted;
     }
 
-    /** The storage-kind and upgrade part of {@link #currentCoreSimpleIronCart}, for CURRENT carts and boats. Pure. */
-    static boolean currentKindAdmitted(Class<?> menuClass, String itemId, int inventorySlots, int upgradeSlots,
-            boolean emptyUpgrades) {
-        return menuClass == MovingStorageContainerMenu.class && CURRENT_IRON_CHEST.equals(itemId)
-                && inventorySlots == 54 && upgradeSlots == 2 && emptyUpgrades;
+    /**
+     * One admitted CURRENT kind: its exact item class and the default cell and upgrade slot counts of Storage
+     * 1.6.15-16 (read by javap of the pinned jars). A world whose config changed the counts is refused, as before.
+     */
+    private record CurrentKind(Class<?> itemClass, int cells, int upgradeSlots) {
+    }
+
+    /** Exactly the plain chests and barrels Motion 0.10.38.395 places on carts and boats; nothing else is admitted. */
+    private static final Map<String, CurrentKind> CURRENT_KINDS = currentKinds();
+
+    private static Map<String, CurrentKind> currentKinds() {
+        Map<String, CurrentKind> kinds = new HashMap<>();
+        String[] materials = {"", "copper_", "iron_", "gold_", "diamond_", "netherite_"};
+        int[] cells = {27, 45, 54, 81, 108, 132};
+        int[] upgrades = {1, 1, 2, 3, 4, 5};
+        for (int i = 0; i < materials.length; i++) {
+            kinds.put("sophisticatedstorage:" + materials[i] + "chest", new CurrentKind(ChestBlockItem.class, cells[i], upgrades[i]));
+            kinds.put("sophisticatedstorage:" + materials[i] + "barrel", new CurrentKind(BarrelBlockItem.class, cells[i], upgrades[i]));
+        }
+        return Map.copyOf(kinds);
+    }
+
+    /**
+     * The storage-kind and upgrade part of {@link #currentCoreSimpleIronCart}, for CURRENT carts and boats. Pure. Admits
+     * only an exact table entry: the plain menu, the entry's exact item class and id, its default cell and upgrade slot
+     * counts, and no upgrade installed. Limited barrels (their own menu), shulker boxes and unknown ids are refused.
+     */
+    static boolean currentKindAdmitted(Class<?> menuClass, Class<?> itemClass, String itemId, int inventorySlots,
+            int upgradeSlots, boolean emptyUpgrades) {
+        CurrentKind kind = itemId == null ? null : CURRENT_KINDS.get(itemId);
+        return menuClass == MovingStorageContainerMenu.class && kind != null && kind.itemClass() == itemClass
+                && inventorySlots == kind.cells() && upgradeSlots == kind.upgradeSlots() && emptyUpgrades;
     }
 
     /**

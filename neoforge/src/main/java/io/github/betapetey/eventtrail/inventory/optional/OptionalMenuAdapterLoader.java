@@ -156,7 +156,7 @@ public final class OptionalMenuAdapterLoader {
                     AdapterKey.STORAGE_IN_MOTION,
                     "sophisticatedstorageinmotion", "Sophisticated Storage in Motion", "0.10.34",
                     Map.of("sophisticatedstorage", "1.5.91", "sophisticatedcore", "1.4.90"),
-                    "Motion 0.10.34.358 (Storage 1.5.91/Core 1.4.90, 1.5.1) or 0.10.38.395 (Storage 1.6.15-16/Core 1.5.25-32); Core 1.5.1 and 0.10.38: unlinked plain iron chest",
+                    "Motion 0.10.34.358 (Storage 1.5.91/Core 1.4.90, 1.5.1) or 0.10.38.395 (Storage 1.6.15-16/Core 1.5.25-32) plain: Core 1.5.1 iron chest; 0.10.38 chests, barrels",
                     Set.of("net.p3pp3rf1y.sophisticatedstorageinmotion.common.gui.MovingStorageContainerMenu"), false,
                     "storagemotion-", "io.github.betapetey.eventtrail.inventory.adapters.storagemotion.StorageInMotionMenuAdapter"),
             new AdapterSpec(
