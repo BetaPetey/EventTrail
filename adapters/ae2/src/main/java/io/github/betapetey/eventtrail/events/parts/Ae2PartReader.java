@@ -10,9 +10,7 @@ import appeng.util.SettingsFrom;
 import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponentMap;
-import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -36,9 +34,9 @@ import java.util.function.Supplier;
  * <p>The reader's own steps (the {@link PartReader} contract):</p>
  * <ul>
  *   <li>Piece items: a part names its item as AE2's own drop builds it ({@code IPart.addPartDrop}: the part item,
- *       then the part's {@code exportSettings(DISMANTLE_ITEM)} export), keeping only the export's custom name, so a
- *       part the player renamed is named as the player sees it; nothing else of the export is copied (see
- *       {@link #partStack}). A facade names {@code IFacadePart.getItemStack()}.</li>
+ *       then the part's {@code exportSettings(DISMANTLE_ITEM)} export), keeping every exported component, so a part
+ *       is named as it drops, a renamed part as the player sees it (see {@link #partStack}). A facade names
+ *       {@code IFacadePart.getItemStack()}.</li>
  *   <li>Hand-over: AE2's wrench take-down ({@code disassembleWithWrench}) gives every stack to
  *       {@code Inventory.placeItemBackInInventory} (the player's inventory) and drops the overflow with
  *       {@code Player.drop} (the drop point).</li>
@@ -98,15 +96,14 @@ public final class Ae2PartReader implements PartReader {
 
     /**
      * A part's piece item, built as AE2's own drop builds it ({@code IPart.addPartDrop}: {@code new ItemStack} of the
-     * part item, then the components of the part's {@code exportSettings(DISMANTLE_ITEM)} export), but keeping only
-     * the export's {@code CUSTOM_NAME}: a renamed part is named as the player sees it, and no other component of the
-     * export (settings, enchantments) is copied. An export without a name gives the same stack as the part item alone.
-     * Plain game types only, so the unit test can run it without AE2.
+     * part item, then every component of the part's {@code exportSettings(DISMANTLE_ITEM)} export applied to it).
+     * F6 (KL-202): the whole export is kept (a custom name, settings, enchantments and the like), so a piece-line row
+     * names the part as it drops. An empty export gives the same stack as the part item alone. Plain game types
+     * only, so the unit test can run it without AE2.
      */
     static ItemStack partStack(ItemLike partItem, DataComponentMap exported) {
         ItemStack stack = new ItemStack(partItem);
-        Component customName = exported.get(DataComponents.CUSTOM_NAME);
-        if (customName != null) stack.set(DataComponents.CUSTOM_NAME, customName);
+        stack.applyComponents(exported);
         return stack;
     }
 

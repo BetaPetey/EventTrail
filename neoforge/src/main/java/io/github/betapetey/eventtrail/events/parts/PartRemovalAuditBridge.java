@@ -8,6 +8,7 @@ import io.github.betapetey.eventtrail.adapters.AdapterFailSafe;
 import io.github.betapetey.eventtrail.adapters.AdapterKey;
 import io.github.betapetey.eventtrail.adapters.MissingAdapterMemberException;
 import io.github.betapetey.eventtrail.core.EventTrailManager;
+import io.github.betapetey.eventtrail.events.block.BlockEntityEvidence;
 import io.github.betapetey.eventtrail.events.evidence.ActorProvenance;
 import io.github.betapetey.eventtrail.events.evidence.BlockAuditPreimage;
 import io.github.betapetey.eventtrail.events.evidence.BlockEvidenceNormalizer;
@@ -26,8 +27,13 @@ import io.github.betapetey.eventtrail.inventory.core.TransactionDirection;
 import io.github.betapetey.eventtrail.inventory.optional.OptionalIntegrationCompatibility;
 import io.github.betapetey.eventtrail.util.DisplayNameResolver;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
+import io.github.betapetey.eventtrail.util.EventTrailNbtUtil;
 import io.github.betapetey.eventtrail.util.RateLimitedDiagnosticGate;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -36,6 +42,7 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -69,9 +76,11 @@ import java.util.function.Supplier;
  * down by wrench, so a part removal is never silent.
  *
  * <p>Rule (the Owner's depot rule): every stack the removal hands over (into the inventory, or onto the floor in the
- * claimed block's cell or at the player's drop point) gets one "Removed Item" row at the block; if the block is
- * gone, one break row as well. Changes made in place write nothing. A break the existing break path records stays
- * exactly as today: the bridge never writes a second row for it. Anything unrecognised is refused with a warning or
+ * claimed block's cell or at the player's drop point) gets one "Removed Item" row at the block, if a removed piece,
+ * the block's saved data taken before the action or (the block gone) the block's own item explains its type (F6, the
+ * Owner's option A; anything else is counted, never written); if the block is gone, one break row as well. Changes
+ * made in place write nothing. A break the existing break path records stays exactly as today: the bridge never
+ * writes a second row for it. Anything unrecognised is refused with a warning or
  * counted, never a wrong row.</p>
  *
  * <p>Two entry points: {@link #beginUse} brackets every right-click on a block ({@code handleUseItemOn}), and
@@ -547,9 +556,23 @@ public final class PartRemovalAuditBridge {
         }
     }
 
-    /** What one finished action writes. */
-    record Outcome(Kind kind, List<ItemRow> itemRows, int unnamedPieces) {
-        static final Outcome NOTHING = new Outcome(Kind.NOTHING, List.of(), 0);
+    /**
+     * What one finished action writes.
+     *
+     * @param unexplainedItems F6: the handed-over item identities left out because nothing explains them
+     * @param refusedTypes     F6 (KL-134): the item types whose inventory gain was refused because a slot changed
+     *                         both its data and its count
+     */
+    record Outcome(Kind kind, List<ItemRow> itemRows, int unnamedPieces, int unexplainedItems, int refusedTypes) {
+        static final Outcome NOTHING = new Outcome(Kind.NOTHING, List.of(), 0, 0, 0);
+
+        Outcome(Kind kind, List<ItemRow> itemRows, int unnamedPieces) {
+            this(kind, itemRows, unnamedPieces, 0, 0);
+        }
+
+        Outcome(Kind kind, List<ItemRow> itemRows, int unnamedPieces, int unexplainedItems) {
+            this(kind, itemRows, unnamedPieces, unexplainedItems, 0);
+        }
 
         enum Kind {
             NOTHING,
@@ -575,6 +598,9 @@ public final class PartRemovalAuditBridge {
      * @param beforePieces        the reader's pieces before the action
      * @param after               the after values, or null when the checks did not pass
      * @param handedOver          everything handed over, per exact item identity
+     * @param savedTypes          F6: the item types (registry ids) in the block's saved data taken before the action
+     * @param ownItemType         F6: the registry id of the before block's own item, or null when it has none
+     * @param refusedTypes        F6 (KL-134): the item types {@link PartRemovalItemCollector#refusedTypes} refused
      */
     record FinishFacts(
             boolean ownedByExistingPath,
@@ -582,7 +608,27 @@ public final class PartRemovalAuditBridge {
             BlockState beforeFluidBlock,
             List<PartReader.Piece> beforePieces,
             PartSnapshot.After after,
-            Map<InventoryItemIdentity, Long> handedOver) {
+            Map<InventoryItemIdentity, Long> handedOver,
+            Set<String> savedTypes,
+            String ownItemType,
+            Set<String> refusedTypes) {
+        FinishFacts {
+            savedTypes = savedTypes == null ? Set.of() : Set.copyOf(savedTypes);
+            refusedTypes = refusedTypes == null ? Set.of() : Set.copyOf(refusedTypes);
+        }
+
+        FinishFacts(
+                boolean ownedByExistingPath,
+                boolean checksPassed,
+                BlockState beforeFluidBlock,
+                List<PartReader.Piece> beforePieces,
+                PartSnapshot.After after,
+                Map<InventoryItemIdentity, Long> handedOver,
+                Set<String> savedTypes,
+                String ownItemType) {
+            this(ownedByExistingPath, checksPassed, beforeFluidBlock, beforePieces, after, handedOver, savedTypes,
+                    ownItemType, Set.of());
+        }
     }
 
     /**
@@ -591,6 +637,11 @@ public final class PartRemovalAuditBridge {
      * block entity object, still claimed) and at least one slot that held a piece is now empty -> item rows; anything
      * else (another block, a placeholder, a new block entity) -> nothing. A slot that holds a piece before and after
      * is an in-place change, never a removal.
+     *
+     * <p>F6 (KL-132, KL-133; the Owner's option A): a handed-over item gets a row only if its type is one of the
+     * removed pieces' types, is in the block's saved data taken before the action, or is the block's own item when
+     * the block is gone. Anything else is left out of the rows and of the piece line's count, and counted
+     * ({@link Outcome#unexplainedItems}).</p>
      */
     static Outcome decide(FinishFacts facts) {
         if (facts.ownedByExistingPath() || !facts.checksPassed() || facts.after() == null) return Outcome.NOTHING;
@@ -605,12 +656,68 @@ public final class PartRemovalAuditBridge {
         } else {
             return Outcome.NOTHING;
         }
+        Set<String> explainedTypes = new HashSet<>(facts.savedTypes());
+        for (PartReader.Piece piece : considered) {
+            if (!piece.item().isEmpty()) explainedTypes.add(itemType(piece.item().getItem()));
+        }
+        if (gone && facts.ownItemType() != null) explainedTypes.add(facts.ownItemType());
+        PartRemovalItemCollector.Explained explained =
+                PartRemovalItemCollector.explained(facts.handedOver(), explainedTypes);
         List<ItemRow> rows = new ArrayList<>();
-        facts.handedOver().forEach((item, count) -> {
-            if (count != null && count > 0L) rows.add(new ItemRow(item, count, false));
-        });
-        int unnamed = pieceLine(considered, facts.handedOver(), rows);
-        return new Outcome(gone ? Outcome.Kind.BLOCK_GONE : Outcome.Kind.PIECES_LEFT, rows, unnamed);
+        explained.kept().forEach((item, count) -> rows.add(new ItemRow(item, count, false)));
+        int unnamed = pieceLine(considered, explained.kept(), rows);
+        return new Outcome(gone ? Outcome.Kind.BLOCK_GONE : Outcome.Kind.PIECES_LEFT, rows, unnamed,
+                explained.unexplained(), facts.refusedTypes().size());
+    }
+
+    /** F6: an item's type as {@link InventoryItemIdentity#registryId} names it. */
+    static String itemType(Item item) {
+        return BuiltInRegistries.ITEM.getKey(item).toString();
+    }
+
+    /** F6: the registry id of {@code state}'s own block item, or null when the block has none (air). */
+    static String ownItemType(BlockState state) {
+        if (state == null) return null;
+        Item item = state.getBlock().asItem();
+        return item == null || item == Items.AIR ? null : itemType(item);
+    }
+
+    /**
+     * F6: {@code id} names a registered item other than air (the production test of
+     * {@link PartRemovalItemCollector#savedItemTypes}).
+     */
+    static boolean registeredItem(String id) {
+        ResourceLocation location;
+        try {
+            location = ResourceLocation.tryParse(id);
+        } catch (RuntimeException notAnId) {
+            return false;
+        }
+        return location != null && !location.equals(BuiltInRegistries.ITEM.getDefaultKey())
+                && BuiltInRegistries.ITEM.containsKey(location);
+    }
+
+    /**
+     * F6: the bridge's own save that {@link ServerScope#open} takes before the action, for the item filter only
+     * (never written). None when the preimage captured the block's data; otherwise {@code save}'s result, or null
+     * when the save fails: the filter then explains only by the removed pieces and the block's own item.
+     */
+    static CompoundTag saveAtOpen(BlockEntityEvidence evidence, Supplier<CompoundTag> save) {
+        if (evidence.status() == BlockEntityEvidence.Status.CAPTURED) return null;
+        try {
+            return save.get();
+        } catch (RuntimeException | LinkageError failure) {
+            return null;
+        }
+    }
+
+    /**
+     * F6: the item types in the block's saved data taken before the action: the preimage's captured copy, else the
+     * bridge's own save from {@link #saveAtOpen}; nothing when neither exists.
+     */
+    static Set<String> savedTypes(BlockEntityEvidence evidence, CompoundTag savedAtOpen) {
+        Tag saved = evidence.capturedData().<Tag>map(tag -> tag).orElse(savedAtOpen);
+        return PartRemovalItemCollector.savedItemTypes(saved, PartRemovalAuditBridge::registeredItem);
     }
 
     /**
@@ -1222,6 +1329,10 @@ public final class PartRemovalAuditBridge {
                     frame);
             OpenAction action = new OpenAction(reader, handle, level, player, actor, position.immutable(), before,
                     player.getItemInHand(hand).getItem());
+            // F6: the block's saved data taken before the action. The preimage's captured save is read at finish;
+            // when the preimage kept none (writer pressure, too large, failed), the bridge takes its own save now.
+            action.savedAtOpen = saveAtOpen(preimage.blockEntityEvidence(),
+                    () -> EventTrailNbtUtil.saveBlockEntity(blockEntity));
             armInPlace(action);
             open = action;
             return action;
@@ -1314,12 +1425,14 @@ public final class PartRemovalAuditBridge {
                 unrecorded(action, FINISH_CHECK);
                 return;
             }
+            List<ItemStack> afterInventory = inventoryCopy(action.player);
             Map<InventoryItemIdentity, Long> handedOver = PartRemovalItemCollector.handedOver(
-                    PartRemovalItemCollector.inventoryGains(
-                            before.inventory(), inventoryCopy(action.player), before.usedSlot()),
+                    PartRemovalItemCollector.inventoryGains(before.inventory(), afterInventory, before.usedSlot()),
                     presentStacks(action));
             Outcome outcome = decide(new FinishFacts(false, true, before.fluidBlock(), before.pieces(), after,
-                    handedOver));
+                    handedOver, savedTypes(before.preimage().blockEntityEvidence(), action.savedAtOpen),
+                    ownItemType(before.state()),
+                    PartRemovalItemCollector.refusedTypes(before.inventory(), afterInventory, before.usedSlot())));
             if (outcome.kind() == Outcome.Kind.NOTHING) return;
             RowContext context = new RowContext(
                     action.actor,
@@ -1347,6 +1460,25 @@ public final class PartRemovalAuditBridge {
                 warn(row.key(), "piece-item-empty", count -> name(row.key()) + ": " + count
                         + " action(s) had a removed piece that could not be named (piece-item-empty); no row was"
                         + " written for that piece");
+            }
+            if (outcome.unexplainedItems() > 0) {
+                // F6 (KL-132, KL-133): the left-out items are counted once per action for this reason, beside a
+                // rate-limited line (check-1 n3: another reason in the same action counts on its own). Owner Q429 (b):
+                // the line also covers saved data that could not be fully read (a failed save, the node bound, an id
+                // in a form the walk does not read).
+                EventTrailManager.getInstance().countDroppedCaptures(1);
+                warn(row.key(), "item-not-explained", count -> name(row.key()) + ": " + count
+                        + " action(s) handed over an item that no removed piece and nothing in the block's saved data"
+                        + " explains (or the block's saved data could not be fully read) (item-not-explained); no row"
+                        + " was written for that item");
+            }
+            if (outcome.refusedTypes() > 0) {
+                // F6 (KL-134): a slot that changed both its data and its count; counted once per action for this
+                // reason. Owner Q431 A: the line as drafted.
+                EventTrailManager.getInstance().countDroppedCaptures(1);
+                warn(row.key(), "item-changed-in-place", count -> name(row.key()) + ": " + count
+                        + " action(s) changed both the data and the count of one inventory stack"
+                        + " (item-changed-in-place); no row was written for that item type's inventory gain");
             }
             List<AuditRecord> rows = assemble(outcome, context, withdrawalsEnabled);
             if (rows.isEmpty()) {
@@ -1636,6 +1768,8 @@ public final class PartRemovalAuditBridge {
         boolean cardAtOpen;
         /** The player's identity totals at open (N-2), or null. */
         Map<InventoryItemIdentity, Long> totalsAtOpen;
+        /** F6: the bridge's own save of the block entity at open, taken only when the preimage kept none; or null. */
+        CompoundTag savedAtOpen;
 
         OpenAction(
                 ReaderSlot row,
