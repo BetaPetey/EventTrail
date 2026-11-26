@@ -15,6 +15,10 @@ import java.util.Optional;
  * time hover), {@code indexedParty}, {@code verb} and {@code parts}, plus the location. {@code actionLabel} (Title Case)
  * and {@code detail} (the flat text) are kept, computed as before, for the existing row checks and gate observers that
  * read them; they are no longer shown in chat.
+ *
+ * <p>{@code partyIsPlayer} says whether {@code indexedParty} names a player (taken from the stored identity kind, never
+ * from the name text). Only a player's name is drawn in the player colour; an environment actor such as "Creeper" or
+ * "Explosion source" is a thing and is drawn like one.
  */
 public record AuditRowView(
         long ordinal,
@@ -25,7 +29,8 @@ public record AuditRowView(
         RowLocation location,
         Optional<Instant> occurredAt,
         Verb verb,
-        List<RowPart> parts) {
+        List<RowPart> parts,
+        boolean partyIsPlayer) {
 
     public AuditRowView {
         if (ordinal < 1L) throw new IllegalArgumentException("ordinal must be positive");
@@ -39,9 +44,23 @@ public record AuditRowView(
         parts = List.copyOf(parts);
     }
 
+    /** The nine-field form: the party is a player. */
+    public AuditRowView(
+            long ordinal,
+            String relativeAge,
+            String indexedParty,
+            String actionLabel,
+            String detail,
+            RowLocation location,
+            Optional<Instant> occurredAt,
+            Verb verb,
+            List<RowPart> parts) {
+        this(ordinal, relativeAge, indexedParty, actionLabel, detail, location, occurredAt, verb, parts, true);
+    }
+
     /**
      * The earlier six-field form, kept so existing callers compile: no exact time (so no time hover), the Title Case
-     * label as a GRAY verb, and the flat detail as one note.
+     * label as a GRAY verb, the flat detail as one note, and the party a player.
      */
     public AuditRowView(
             long ordinal,
@@ -51,7 +70,7 @@ public record AuditRowView(
             String detail,
             RowLocation location) {
         this(ordinal, relativeAge, indexedParty, actionLabel, detail, location, Optional.empty(),
-                new Verb(required(actionLabel, "actionLabel"), Tone.GRAY),
+                new Verb(required(actionLabel, "actionLabel")),
                 List.of(new RowPart.Joiner(" "), new RowPart.Note(required(detail, "detail"))));
     }
 
@@ -81,16 +100,12 @@ public record AuditRowView(
         return value;
     }
 
-    /** The row's lower-case action word and its colour (never colour alone: the word stays). */
-    public record Verb(String text, Tone tone) {
+    /** The row's lower-case action word. The renderer draws every action word GRAY (Owner Q443 B). */
+    public record Verb(String text) {
         public Verb {
             text = required(text, "verb");
-            tone = Objects.requireNonNull(tone, "tone");
         }
     }
-
-    /** Action-word colours; the renderer maps each to its chat colour. */
-    public enum Tone { RED, GREEN, YELLOW, GOLD, SKY_BLUE, DARK_AQUA, GRAY }
 
     /**
      * Dimension and coordinates are one identity; only navigationCommand is interactive. {@code showDimension} means

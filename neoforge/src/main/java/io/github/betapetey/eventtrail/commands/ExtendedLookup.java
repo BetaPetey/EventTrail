@@ -57,6 +57,7 @@ import io.github.betapetey.eventtrail.storage.ThingFilter;
 import io.github.betapetey.eventtrail.storage.ThingFilters;
 import io.github.betapetey.eventtrail.util.DisplayNameResolver;
 import io.github.betapetey.eventtrail.util.EventTrailDiagnostics;
+import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -85,8 +86,10 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.time.Clock;
 import java.time.ZoneId;
 import java.util.regex.Matcher;
@@ -1249,29 +1252,26 @@ public final class ExtendedLookup {
         }
         RequestTransition transition = planned.transition();
         AdvancedQuery pageQuery = session.query().withPage(requestedPage);
+        // The admit step takes the shown page's teleport links away; a page past the end puts them back.
+        AtomicReference<ConcurrentHashMap<String, TeleportLink>> detachedLinks = new AtomicReference<>();
         EventTrailQueryDispatcher.PlayerSubmission<QueryResult> submission = EventTrailQueryDispatcher.submitPlayerAndDispatch(
                 playerId,
                 () -> runQuery(advancedStorage, pageQuery, started),
-                () -> {
-                    InvestigationSessions.REGISTRY.admit(transition);
-                    clearTeleportLinks(playerId);
-                },
+                () -> detachedLinks.set(admitPageRequest(transition, playerId)),
                 server::execute,
                 () -> server.getPlayerList().getPlayer(playerId),
                 player,
-                (currentPlayer, result) -> {
-                    if (!InvestigationSessions.REGISTRY.isPending(transition)) return;
-                    String denial = revalidatePageLookupState(playerId, session,
-                            node -> EventTrailPermissions.hasExactPermission(
-                                    currentPlayer.createCommandSourceStack(), node));
-                    if (denial != null) {
-                        currentPlayer.sendSystemMessage(Component.literal("§c" + denial));
-                        return;
-                    }
-                    LookupSession updated = session.withQuery(result.query());
-                    if (!InvestigationSessions.REGISTRY.publishLookup(transition, updated)) return;
-                    render(currentPlayer, updated, result);
-                },
+                (currentPlayer, result) -> handlePageResult(
+                        transition, session, playerId, requestedPage, result.totalPages(), detachedLinks.get(),
+                        () -> revalidatePageLookupState(playerId, session,
+                                node -> EventTrailPermissions.hasExactPermission(
+                                        currentPlayer.createCommandSourceStack(), node)),
+                        currentPlayer::sendSystemMessage,
+                        () -> {
+                            LookupSession updated = session.withQuery(result.query());
+                            if (!InvestigationSessions.REGISTRY.publishLookup(transition, updated)) return;
+                            render(currentPlayer, updated, result);
+                        }),
                 (currentPlayer, error) -> {
                     if (!InvestigationSessions.REGISTRY.fail(transition)) return;
                     if (EventTrailQueryException.find(error) == null
@@ -1713,6 +1713,82 @@ public final class ExtendedLookup {
 
     static void clearTeleportLinks(UUID playerId) {
         TELEPORT_LINKS.remove(playerId);
+    }
+
+    /** Takes the player's teleport links away (as {@link #clearTeleportLinks} does) and hands them back, or null. */
+    static ConcurrentHashMap<String, TeleportLink> detachTeleportLinks(UUID playerId) {
+        return TELEPORT_LINKS.remove(playerId);
+    }
+
+    /**
+     * The dispatcher's admit step for a page request: the request becomes the pending one, and the shown page's
+     * teleport links are taken away but kept (returned, or null when there were none) so a page past the end can put
+     * them back. They are not cleared: that would lose them for good.
+     */
+    static ConcurrentHashMap<String, TeleportLink> admitPageRequest(RequestTransition transition, UUID playerId) {
+        InvestigationSessions.REGISTRY.admit(transition);
+        return detachTeleportLinks(playerId);
+    }
+
+    /**
+     * What a page request does with its result, in this order: a request that is no longer the pending one does
+     * nothing; then the permission recheck ({@code permissionRecheck} gives the denial text or null), and a denial is
+     * sent in red; then a page past the end keeps the shown page and says "Page N does not exist."; otherwise
+     * {@code showRequestedPage} runs. The permission recheck comes before the past-the-end check so a player who lost
+     * the permission learns nothing about how many pages there are.
+     */
+    static void handlePageResult(
+            RequestTransition transition,
+            LookupSession session,
+            UUID playerId,
+            int requestedPage,
+            int totalPages,
+            ConcurrentHashMap<String, TeleportLink> detachedLinks,
+            Supplier<String> permissionRecheck,
+            Consumer<Component> send,
+            Runnable showRequestedPage) {
+        if (!InvestigationSessions.REGISTRY.isPending(transition)) return;
+        String denial = permissionRecheck.get();
+        if (denial != null) {
+            send.accept(Component.literal("§c" + denial));
+            return;
+        }
+        if (isPastTheEnd(requestedPage, totalPages)) {
+            // Same message as inspect; the page on screen, its session and its links stay as they were.
+            if (!keepShownPage(transition, session, playerId, detachedLinks)) return;
+            send.accept(pageDoesNotExist(requestedPage));
+            return;
+        }
+        showRequestedPage.run();
+    }
+
+    /**
+     * The one "Page N does not exist." message. Lookup paging and inspect paging both use it, so the two cannot drift
+     * apart.
+     */
+    static Component pageDoesNotExist(int requestedPage) {
+        return Component.literal("Page " + requestedPage + " does not exist.").withStyle(ChatFormatting.RED);
+    }
+
+    /** Whether a page request is past the last page (the storage clamps it to the last page, so the lookup checks). */
+    static boolean isPastTheEnd(int requestedPage, int totalPages) {
+        return requestedPage > totalPages;
+    }
+
+    /**
+     * A page request past the end: puts the page that was on screen back as it was. The admitted request's pending
+     * state becomes the unchanged lookup again (not a failure, which would empty the page state), and the links taken
+     * away at admission come back unless a newer page has already made its own. False when the request is no longer the
+     * pending one, and then nothing is restored.
+     */
+    static boolean keepShownPage(
+            RequestTransition transition,
+            LookupSession session,
+            UUID playerId,
+            ConcurrentHashMap<String, TeleportLink> detachedLinks) {
+        if (!InvestigationSessions.REGISTRY.publishLookup(transition, session)) return false;
+        if (detachedLinks != null) TELEPORT_LINKS.putIfAbsent(playerId, detachedLinks);
+        return true;
     }
 
     static boolean hasActiveTeleportLinks(UUID playerId) {

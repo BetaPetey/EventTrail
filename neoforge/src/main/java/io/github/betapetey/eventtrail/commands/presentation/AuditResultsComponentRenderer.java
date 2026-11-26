@@ -5,7 +5,6 @@ import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.network.chat.TextColor;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -29,6 +28,10 @@ import java.util.function.Supplier;
  * dimension when no line on screen names it), the time (the exact time, then "Click to copy"; the click copies the exact
  * time), the filter line ("Click: edit this search") and the pager. Player names, action words, counts and the summary
  * carry none.
+ *
+ * <p>Colours in a row: players (the row's player and the player names inside a row) are YELLOW, things and counts
+ * WHITE (a row actor that is not a player, such as a creeper, is a thing), every action word is GRAY (#AAAAAA, Owner
+ * Q443 B), and coordinates are AQUA, so players against things can be told apart at a glance.
  */
 public final class AuditResultsComponentRenderer {
     public static final String BRAND = "EventTrail";
@@ -38,7 +41,6 @@ public final class AuditResultsComponentRenderer {
     public static final String COPY_HOVER = "Click to copy";
     public static final String EDIT_SEARCH_HOVER = "Click: edit this search";
     public static final String RENAMED_PREFIX = "Renamed: \"";
-    public static final int SKY_BLUE_RGB = 0x6FB0FF;
 
     private final PageNavigationComponentRenderer navigationRenderer;
     private final Supplier<ZoneId> zone;
@@ -188,7 +190,7 @@ public final class AuditResultsComponentRenderer {
         MutableComponent line = Component.empty()
                 .append(age(view.relativeAge(), view.occurredAt(), displayZone))
                 .append(Component.literal(" "))
-                .append(party(view.indexedParty()))
+                .append(party(view.indexedParty(), view.partyIsPlayer()))
                 .append(Component.literal(" "))
                 .append(verb(view.verb()));
         for (RowPart part : view.parts()) line.append(part(part));
@@ -216,26 +218,18 @@ public final class AuditResultsComponentRenderer {
         return age;
     }
 
-    /** The row's player. No hover and no click (Q243 B: no click on player names or action words). */
-    private static MutableComponent party(String indexedParty) {
-        return Component.literal(indexedParty).withStyle(ChatFormatting.WHITE);
+    /**
+     * The row's actor. A player is YELLOW so players stand apart from things; an actor that is not a player (an
+     * environment actor such as "Creeper" or "Explosion source") is WHITE like any other thing. No hover and no click
+     * (Q243 B: no click on player names or action words).
+     */
+    private static MutableComponent party(String indexedParty, boolean isPlayer) {
+        return Component.literal(indexedParty).withStyle(isPlayer ? ChatFormatting.YELLOW : ChatFormatting.WHITE);
     }
 
-    /** The action word in its colour. No hover and no click (Q243 B). */
+    /** The action word, GRAY (#AAAAAA) for every action (Owner Q443 B). No hover and no click (Q243 B). */
     private static MutableComponent verb(AuditRowView.Verb verb) {
-        return Component.literal(verb.text()).withStyle(style -> style.withColor(colour(verb.tone())));
-    }
-
-    static TextColor colour(AuditRowView.Tone tone) {
-        return switch (tone) {
-            case RED -> TextColor.fromLegacyFormat(ChatFormatting.RED);
-            case GREEN -> TextColor.fromLegacyFormat(ChatFormatting.GREEN);
-            case YELLOW -> TextColor.fromLegacyFormat(ChatFormatting.YELLOW);
-            case GOLD -> TextColor.fromLegacyFormat(ChatFormatting.GOLD);
-            case SKY_BLUE -> TextColor.fromRgb(SKY_BLUE_RGB);
-            case DARK_AQUA -> TextColor.fromLegacyFormat(ChatFormatting.DARK_AQUA);
-            case GRAY -> TextColor.fromLegacyFormat(ChatFormatting.GRAY);
-        };
+        return Component.literal(verb.text()).withStyle(ChatFormatting.GRAY);
     }
 
     private static MutableComponent part(RowPart part) {
@@ -243,7 +237,7 @@ public final class AuditResultsComponentRenderer {
             case RowPart.Count count -> Component.literal(count.plainText()).withStyle(ChatFormatting.WHITE);
             case RowPart.Joiner joiner -> Component.literal(joiner.text()).withStyle(ChatFormatting.GRAY);
             case RowPart.Note note -> Component.literal(note.text()).withStyle(ChatFormatting.GRAY);
-            case RowPart.Name name -> Component.literal(name.text()).withStyle(ChatFormatting.WHITE);
+            case RowPart.Name name -> Component.literal(name.text()).withStyle(ChatFormatting.YELLOW);
             case RowPart.Thing thing -> thing(thing);
         };
     }

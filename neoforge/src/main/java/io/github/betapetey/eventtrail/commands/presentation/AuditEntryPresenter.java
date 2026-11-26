@@ -167,6 +167,9 @@ public final class AuditEntryPresenter {
                 == AuditAttribution.IdentityKind.SYNTHETIC_PLAYER) {
             indexedParty += " (automated)";
         }
+        // From the stored identity kind, never from the name text: only an environment actor is not a player.
+        boolean partyIsPlayer = record.attribution().indexedParty().kind()
+                != AuditAttribution.IdentityKind.ENVIRONMENT;
         String suffix = explosionSuffix(record, verdicts);
         return new AuditRowView(
                 ordinal,
@@ -181,7 +184,8 @@ public final class AuditEntryPresenter {
                         navigationCommand),
                 Optional.of(record.occurredAt()),
                 actions.verb(record),
-                parts(record, suffix));
+                parts(record, suffix),
+                partyIsPlayer);
     }
 
     /** Explosion split: the tag label and verdict of a row of an explosion stored in parts; "" for any other row. */
@@ -265,8 +269,9 @@ public final class AuditEntryPresenter {
     }
 
     /**
-     * Drops and pick-ups: "3x Diamond (renamed "X")" as stored becomes 3×, the item and its ID. Q277 A: the count shows
-     * only when more than one ("dropped Torch", "dropped 7× Torch").
+     * Drops and pick-ups: "3x Diamond (renamed "X")" as stored becomes 3×, the item and its ID. The count always shows,
+     * a count of one included ("dropped 1× Torch", "dropped 7× Torch"), as it does on every other row with an item
+     * count (a standing Owner rule). A stored count below one shows no count part (there is no such row to show).
      */
     private static void itemParts(AuditRecord record, List<RowPart> parts) {
         String shown = record.subject().presentationIdentity();
@@ -275,7 +280,7 @@ public final class AuditEntryPresenter {
         Matcher counted = COUNTED_ITEM.matcher(shown);
         if (counted.matches()) {
             long count = Long.parseLong(counted.group(1));
-            if (count > 1L) parts.add(new RowPart.Count(count));
+            if (count >= 1L) parts.add(new RowPart.Count(count));
             parts.add(thing(counted.group(2), id, RowPart.Role.OBJECT));
         } else {
             parts.add(thing(shown, id, RowPart.Role.OBJECT));

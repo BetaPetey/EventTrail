@@ -85,8 +85,9 @@ public sealed interface RowPart permits RowPart.Count, RowPart.Thing, RowPart.Jo
     }
 
     /**
-     * A player's name inside the row text (a killer, a death credit). WHITE, with no hover and no click: the player-name
-     * search click was Owner question Q243, decided B: no click on player names or action words.
+     * A player's name inside the row text (a killer, a death credit). YELLOW like the row's player, with no hover and
+     * no click: the player-name search click was Owner question Q243, decided B: no click on player names or action
+     * words.
      */
     record Name(String text) implements RowPart {
         public Name {

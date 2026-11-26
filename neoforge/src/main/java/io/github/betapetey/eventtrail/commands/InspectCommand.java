@@ -245,16 +245,21 @@ public final class InspectCommand {
             RENDERER.renderInspect(withTeleport(player, completion.view())).forEach(player::sendSystemMessage);
             return 1;
         }
-        if (completion.status() == InspectUseCase.CompletionStatus.PERMISSION_DENIED) {
-            source.sendFailure(Component.literal(
-                    "§cYou don't have permission to use EventTrail inspect mode."));
-        } else if (completion.status() == InspectUseCase.CompletionStatus.INVALID_PAGE) {
-            source.sendFailure(Component.literal("§cPage " + requested + " does not exist."));
-        } else {
-            source.sendFailure(Component.literal(
-                    "§cNo results to page through. Run a lookup or inspect first."));
-        }
+        source.sendFailure(pageFailure(completion.status(), requested));
         return 0;
+    }
+
+    /**
+     * The failure line for a page request that shows no page. A page past the end uses the one shared
+     * "Page N does not exist." message, the same as lookup paging.
+     */
+    static Component pageFailure(InspectUseCase.CompletionStatus status, int requested) {
+        if (status == InspectUseCase.CompletionStatus.PERMISSION_DENIED) {
+            return Component.literal("§cYou don't have permission to use EventTrail inspect mode.");
+        } else if (status == InspectUseCase.CompletionStatus.INVALID_PAGE) {
+            return ExtendedLookup.pageDoesNotExist(requested);
+        }
+        return Component.literal("§cNo results to page through. Run a lookup or inspect first.");
     }
 
     /**

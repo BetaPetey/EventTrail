@@ -47,16 +47,16 @@ public final class AuditActionPresentationCatalog {
         labels = Map.copyOf(configured);
 
         EnumMap<AuditAction, AuditRowView.Verb> rowVerbs = new EnumMap<>(AuditAction.class);
-        rowVerbs.put(AuditAction.BLOCK_BREAK, new AuditRowView.Verb("broke", AuditRowView.Tone.RED));
-        rowVerbs.put(AuditAction.BLOCK_PLACE, new AuditRowView.Verb("placed", AuditRowView.Tone.GREEN));
-        rowVerbs.put(AuditAction.CONTAINER_ACCESS, new AuditRowView.Verb("accessed", AuditRowView.Tone.GRAY));
-        rowVerbs.put(AuditAction.CONTAINER_DEPOSIT, new AuditRowView.Verb("added", AuditRowView.Tone.YELLOW));
-        rowVerbs.put(AuditAction.CONTAINER_WITHDRAWAL, new AuditRowView.Verb("took", AuditRowView.Tone.GOLD));
-        rowVerbs.put(AuditAction.ENTITY_KILL, new AuditRowView.Verb("killed", AuditRowView.Tone.SKY_BLUE));
-        rowVerbs.put(AuditAction.ENTITY_DEATH, new AuditRowView.Verb("died", AuditRowView.Tone.SKY_BLUE));
-        rowVerbs.put(AuditAction.ITEM_DROP, new AuditRowView.Verb("dropped", AuditRowView.Tone.DARK_AQUA));
-        rowVerbs.put(AuditAction.ITEM_PICKUP, new AuditRowView.Verb("picked up", AuditRowView.Tone.DARK_AQUA));
-        rowVerbs.put(AuditAction.EXPLOSION, new AuditRowView.Verb("blew up", AuditRowView.Tone.RED));
+        rowVerbs.put(AuditAction.BLOCK_BREAK, new AuditRowView.Verb("broke"));
+        rowVerbs.put(AuditAction.BLOCK_PLACE, new AuditRowView.Verb("placed"));
+        rowVerbs.put(AuditAction.CONTAINER_ACCESS, new AuditRowView.Verb("accessed"));
+        rowVerbs.put(AuditAction.CONTAINER_DEPOSIT, new AuditRowView.Verb("added"));
+        rowVerbs.put(AuditAction.CONTAINER_WITHDRAWAL, new AuditRowView.Verb("took"));
+        rowVerbs.put(AuditAction.ENTITY_KILL, new AuditRowView.Verb("killed"));
+        rowVerbs.put(AuditAction.ENTITY_DEATH, new AuditRowView.Verb("died"));
+        rowVerbs.put(AuditAction.ITEM_DROP, new AuditRowView.Verb("dropped"));
+        rowVerbs.put(AuditAction.ITEM_PICKUP, new AuditRowView.Verb("picked up"));
+        rowVerbs.put(AuditAction.EXPLOSION, new AuditRowView.Verb("blew up"));
         if (rowVerbs.size() != AuditAction.catalog().size()) {
             throw new IllegalStateException("Every EventTrail action requires a row verb");
         }
@@ -91,21 +91,20 @@ public final class AuditActionPresentationCatalog {
     }
 
     /**
-     * The row's lower-case action word and colour (Design B, design03.py VERB; Q214: took gold, killed sky blue). The
-     * words the Owner's pictures did not show are lead calls (plan G4): closed, accessed, died, blew up, and "put" for
-     * an item put into a trash (the row adds the " (trash)" note, so it never reads as destroyed).
+     * The row's lower-case action word (Design B, design03.py VERB). The words the Owner's pictures did not show are
+     * lead calls (plan G4): closed, accessed, died, blew up, and "put" for an item put into a trash (the row adds the
+     * " (trash)" note, so it never reads as destroyed). Every action word is drawn GRAY (Owner Q443 B); the renderer
+     * sets the colour, so no word carries one here.
      */
     public AuditRowView.Verb verb(AuditRecord record) {
         Objects.requireNonNull(record, "record");
         if (record.evidence() instanceof AuditEvidence.ContainerAccess access) {
-            return access.phase() == AuditEvidence.AccessPhase.OPEN
-                    ? new AuditRowView.Verb("opened", AuditRowView.Tone.GRAY)
-                    : new AuditRowView.Verb("closed", AuditRowView.Tone.GRAY);
+            return new AuditRowView.Verb(access.phase() == AuditEvidence.AccessPhase.OPEN ? "opened" : "closed");
         }
         if (record.evidence() instanceof AuditEvidence.ContainerTransfer transfer
                 && record.action() == AuditAction.CONTAINER_DEPOSIT
                 && trashTransfer(record.action(), transfer)) {
-            return new AuditRowView.Verb("put", AuditRowView.Tone.YELLOW);
+            return new AuditRowView.Verb("put");
         }
         return verb(record.action());
     }
