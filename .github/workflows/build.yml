@@ -48,6 +48,52 @@ jobs:
             exit 1
           fi
 
+      # Gradle's downloaded dependencies only (caches/modules-2, without its lock and gc files): no build outputs, no
+      # wrapper, no settings. The key is the runner OS and the hash of every file that decides what is downloaded; no
+      # restore-keys, so a run uses a cache made from the same inputs or starts empty. Strict dependency verification
+      # still checks the hash of every dependency file the build uses. Pull request runs only restore; a push run
+      # saves at the end, after the build and the jar upload pass.
+      - name: Restore the Gradle dependency cache
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            !~/.gradle/caches/modules-2/*.lock
+            !~/.gradle/caches/modules-2/gc.properties
+          key: gradle-deps-v1-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle', '**/*.gradle.kts', 'gradle.properties', 'gradle/*.versions.toml', 'gradle/verification-metadata.xml') }}
+
+      # The restore unpacks whatever the cache entry holds, so check what it left: ~/.gradle may hold only caches and
+      # caches/modules-2, only plain files and folders (no symlinks), and no user gradle.properties or init.d. Then the
+      # same verification-mode check as "Require dependency verification", again after the restore.
+      - name: Check the Gradle home holds only the dependency cache
+        run: |
+          set -euo pipefail
+          g="$HOME/.gradle"
+          fail() { echo "::error title=gradle-home::$1"; exit 1; }
+          if [ -L "$g" ]; then fail "~/.gradle is a symlink"; fi
+          if [ -e "$g/gradle.properties" ] || [ -L "$g/gradle.properties" ]; then fail "~/.gradle/gradle.properties exists"; fi
+          if [ -e "$g/init.d" ] || [ -L "$g/init.d" ]; then fail "~/.gradle/init.d exists"; fi
+          if [ -e "$g" ]; then
+            if [ ! -d "$g" ]; then fail "~/.gradle is not a folder"; fi
+            odd="$(find "$g" ! -type f ! -type d -print -quit)"
+            if [ -n "$odd" ]; then fail "not a plain file or folder (a symlink or special file): $odd"; fi
+            extra="$(find "$g" -mindepth 1 -maxdepth 1 ! -path "$g/caches" -print -quit)"
+            if [ -n "$extra" ]; then fail "unexpected entry in ~/.gradle: $extra"; fi
+            if [ -e "$g/caches" ]; then
+              if [ ! -d "$g/caches" ]; then fail "~/.gradle/caches is not a folder"; fi
+              extra="$(find "$g/caches" -mindepth 1 -maxdepth 1 ! -path "$g/caches/modules-2" -print -quit)"
+              if [ -n "$extra" ]; then fail "unexpected entry in ~/.gradle/caches: $extra"; fi
+              if [ -e "$g/caches/modules-2" ] && [ ! -d "$g/caches/modules-2" ]; then fail "modules-2 is not a folder"; fi
+            fi
+          fi
+          test -f gradle/verification-metadata.xml
+          grep -Eq '^[[:space:]]*<verify-metadata>true</verify-metadata>[[:space:]]*$' gradle/verification-metadata.xml
+          if grep -q 'org.gradle.dependency.verification' gradle.properties; then
+            echo "gradle.properties must not set the dependency verification mode"
+            exit 1
+          fi
+
       - name: Build (the README command)
         run: ./gradlew build
 
@@ -140,3 +186,14 @@ jobs:
           path: ${{ steps.jar.outputs.path }}
           archive: false
           if-no-files-found: error
+
+      # Last, so only a run whose build and jar upload both passed can save; never on a pull request.
+      - name: Save the Gradle dependency cache
+        if: github.event_name == 'push' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            !~/.gradle/caches/modules-2/*.lock
+            !~/.gradle/caches/modules-2/gc.properties
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
