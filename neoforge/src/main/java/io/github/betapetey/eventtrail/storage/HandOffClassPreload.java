@@ -8,9 +8,10 @@ import java.util.function.Consumer;
  * and the spool's staging) loads on first use, loaded and initialised once when a storage starts, so the first
  * calls on the game thread do not load them. The list is the EventTrail classes the round-2 JFR recording showed
  * the burst's producer threads loading in the cold MySQL leg (5 to 14 ms each; DiskSpool$Staged and SpoolFrameCodec
- * were loaded while writeLifecycleLock was held). Only loading and static initialisation: no record is built, nothing
- * is written, and none of these classes' static initialisers touches Minecraft state. A class that cannot be loaded
- * is logged at debug level and skipped; it never stops the storage from starting.
+ * were loaded while writeLifecycleLock was held), plus the six classes the transfer version 3 decode (ItemDetails B1)
+ * loads first (CompactIO's reader, DetailsBlob, ItemDetails' identity). Only loading and static initialisation: no
+ * record is built, nothing is written, and none of these classes' static initialisers touches Minecraft state. A
+ * class that cannot be loaded is logged at debug level and skipped; it never stops the storage from starting.
  */
 final class HandOffClassPreload {
     private HandOffClassPreload() {}
@@ -27,6 +28,8 @@ final class HandOffClassPreload {
             "io.github.betapetey.eventtrail.audit.AuditRecord$1",
             "io.github.betapetey.eventtrail.audit.AuditText",
             "io.github.betapetey.eventtrail.audit.ProductionAuditPayloadCodec$1",
+            "io.github.betapetey.eventtrail.audit.codec.CompactIO$MalformedException",
+            "io.github.betapetey.eventtrail.audit.codec.CompactIO$Reader",
             "io.github.betapetey.eventtrail.events.block.BlockEffectPayload$ActorKind",
             "io.github.betapetey.eventtrail.events.block.BlockEffectPayloadCodec",
             "io.github.betapetey.eventtrail.events.block.BlockEffectPayloadCodec$DecodeResult",
@@ -52,6 +55,9 @@ final class HandOffClassPreload {
             "io.github.betapetey.eventtrail.util.AuditSnbtParser",
             "io.github.betapetey.eventtrail.util.AuditSnbtParser$ParseResult",
             "io.github.betapetey.eventtrail.util.AuditSnbtParser$Status",
+            "io.github.betapetey.eventtrail.util.DetailsBlob",
+            "io.github.betapetey.eventtrail.util.DetailsBlob$Decoded",
+            "io.github.betapetey.eventtrail.util.DetailsBlob$Limits",
             "io.github.betapetey.eventtrail.util.EntityEventPayloadCodec",
             "io.github.betapetey.eventtrail.util.EntityEventPayloadCodec$1",
             "io.github.betapetey.eventtrail.util.EntityEventPayloadCodec$AuditProjection",
@@ -63,7 +69,8 @@ final class HandOffClassPreload {
             "io.github.betapetey.eventtrail.util.EntityEventPayloadCodec$ProvenanceKind",
             "io.github.betapetey.eventtrail.util.EntityEventPayloadCodec$VictimKind",
             "io.github.betapetey.eventtrail.util.EventTrailText",
-            "io.github.betapetey.eventtrail.util.EventTrailTextBounds");
+            "io.github.betapetey.eventtrail.util.EventTrailTextBounds",
+            "io.github.betapetey.eventtrail.util.ItemDetails$Identity");
 
     /**
      * Loads and initialises every class in {@link #CLASSES} with {@code loader}. Returns how many loaded. A class that

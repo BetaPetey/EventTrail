@@ -80,21 +80,9 @@ public class EventTrailNbtUtil {
                 ? tag.getString(EventTrailTextBounds.METADATA_REASON_KEY)
                 : null;
         try {
-            RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, provider);
-            // A count above the codec's range (the count-1-copy form of stackToNbt, or an older explicit
-            // fallback) is decoded through a count-1 copy and given back its exact count.
-            int exactCount = countAboveCodecLimit(tag);
-            CompoundTag codecInput = tag;
-            if (exactCount > 0) {
-                codecInput = tag.copy();
-                codecInput.putInt(STACK_COUNT_KEY, 1);
-            }
-            DataResult<ItemStack> result = ItemStack.CODEC.parse(ops, codecInput);
-            Optional<ItemStack> decoded = result.result();
-            if (decoded.isPresent() && !decoded.get().isEmpty()) {
-                ItemStack stack = decoded.get();
-                if (exactCount > 0) stack.setCount(exactCount);
-                return new StackDecodeResult(stack, metadataUnavailable, metadataReason);
+            StackRebuild rebuilt = rebuildStack(tag, provider);
+            if (rebuilt.rebuilt()) {
+                return new StackDecodeResult(rebuilt.stack(), metadataUnavailable, metadataReason);
             }
         } catch (RuntimeException exception) {
             reportSerializationFailure("item read", itemIdentity(tag), exception);
@@ -120,13 +108,9 @@ public class EventTrailNbtUtil {
 
         try {
             // KL-68: ItemStack.CODEC refuses a count above 99, which would drop the components of every
-            // larger row. The components are encoded from a count-1 copy (the codec's output does not
-            // depend on the count otherwise) and the exact count replaces the copy's in the same field.
-            int count = stack.getCount();
-            boolean aboveCodecLimit = count > ITEM_CODEC_MAX_COUNT;
-            Tag tag = encoder.encode(aboveCodecLimit ? stack.copyWithCount(1) : stack);
+            // larger row; encodeExact encodes a count-1 copy and puts the exact count back.
+            Tag tag = encodeExact(stack, encoder);
             if (tag instanceof CompoundTag compoundTag) {
-                if (aboveCodecLimit) compoundTag.putInt(STACK_COUNT_KEY, count);
                 if (compoundTag.sizeInBytes() > EventTrailTextBounds.MAX_ITEM_METADATA_NBT_BYTES) {
                     reportMetadataTooLarge("item write", itemIdentity(stack), compoundTag.sizeInBytes());
                     return fallbackStackTag(stack, EventTrailTextBounds.METADATA_REASON_TOO_LARGE);
@@ -156,7 +140,56 @@ public class EventTrailNbtUtil {
         return stackToNbt(stack, value -> encodeStack(value, provider));
     }
 
-    private static Tag encodeStack(ItemStack stack, HolderLookup.Provider provider) {
+    /**
+     * The shared KL-68 encode step (ItemDetails plan 1.3 step 2): a count above the codec's range is encoded from a
+     * count-1 copy (the codec's output does not depend on the count otherwise) and the exact count replaces the
+     * copy's in the same field. Throws what the encoder throws; a non-compound result is returned as it is.
+     */
+    static Tag encodeExact(ItemStack stack, StackEncoder encoder) {
+        int count = stack.getCount();
+        boolean aboveCodecLimit = count > ITEM_CODEC_MAX_COUNT;
+        Tag tag = encoder.encode(aboveCodecLimit ? stack.copyWithCount(1) : stack);
+        if (aboveCodecLimit && tag instanceof CompoundTag compoundTag) compoundTag.putInt(STACK_COUNT_KEY, count);
+        return tag;
+    }
+
+    /**
+     * A rebuilt stack, or EMPTY with the codec's failed result (null when it gave an empty stack). The result is kept
+     * unevaluated: its message is built only by the one caller that reports it (ItemDetails.capture, review m1).
+     */
+    record StackRebuild(ItemStack stack, DataResult<ItemStack> failure) {
+        boolean rebuilt() {
+            return stack != null && !stack.isEmpty();
+        }
+    }
+
+    /**
+     * The shared rebuild step (ItemDetails plan 1.3 step 6) of the one correct reader: the codec's full result (never
+     * a partial one), through a count-1 copy for a count above 99, given back its exact count. Reports nothing,
+     * builds no error message; throws what the codec throws.
+     */
+    static StackRebuild rebuildStack(CompoundTag tag, HolderLookup.Provider provider) {
+        RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, provider);
+        // A count above the codec's range (the count-1-copy form of stackToNbt, or an older explicit
+        // fallback) is decoded through a count-1 copy and given back its exact count.
+        int exactCount = countAboveCodecLimit(tag);
+        CompoundTag codecInput = tag;
+        if (exactCount > 0) {
+            codecInput = tag.copy();
+            codecInput.putInt(STACK_COUNT_KEY, 1);
+        }
+        DataResult<ItemStack> result = ItemStack.CODEC.parse(ops, codecInput);
+        Optional<ItemStack> decoded = result.result();
+        if (decoded.isPresent() && !decoded.get().isEmpty()) {
+            ItemStack stack = decoded.get();
+            if (exactCount > 0) stack.setCount(exactCount);
+            return new StackRebuild(stack, null);
+        }
+        // No message is built here: today's reader drops it, so the old path does no new work.
+        return new StackRebuild(ItemStack.EMPTY, decoded.isPresent() ? null : result);
+    }
+
+    static Tag encodeStack(ItemStack stack, HolderLookup.Provider provider) {
         RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, provider);
         return ItemStack.CODEC.encodeStart(ops, stack).result()
                 .orElseThrow(() -> new IllegalStateException("ItemStack codec did not produce NBT"));
@@ -189,7 +222,7 @@ public class EventTrailNbtUtil {
         return fallback;
     }
 
-    private static String itemIdentity(ItemStack stack) {
+    static String itemIdentity(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return "empty item stack";
         }
@@ -245,6 +278,46 @@ public class EventTrailNbtUtil {
                         "storing an explicit too-large marker{}",
                 sanitizeIdentity(category), sanitizeIdentity(identity), Math.max(0L, measuredSize),
                 suppressed == 0 ? "" : "; " + suppressed + " similar warnings suppressed");
+    }
+
+    /**
+     * The item-details WARN (ItemDetails plan 1.3), on the same rate-limit gate as the two above: what the capture
+     * found for an item, as one short reason code and detail. An overload of {@link #reportSerializationFailure}
+     * would be ambiguous for its callers that pass a {@code null} cause.
+     */
+    static void reportDetailsFailure(String category, String identity, String detail) {
+        long now = System.currentTimeMillis();
+        long next = nextSerializationWarning.get();
+        if (now < next || !nextSerializationWarning.compareAndSet(next, now + SERIALIZATION_WARNING_INTERVAL_MS)) {
+            suppressedSerializationWarnings.increment();
+            return;
+        }
+
+        long suppressed = suppressedSerializationWarnings.sumThenReset();
+        LOGGER.warn(
+                "EventTrail {} item details for {}: {}{}",
+                sanitizeIdentity(category), sanitizeIdentity(withoutControls(identity)),
+                sanitizeIdentity(withoutControls(detail)),
+                suppressed == 0 ? "" : "; " + suppressed + " similar warnings suppressed");
+    }
+
+    /**
+     * Review n5: a details WARN can carry codec message text, which can hold player-authored text. Every ISO control
+     * character (ESC and the rest, not only CR, LF and TAB) becomes a space before the shared trim and cut.
+     */
+    static String withoutControls(String value) {
+        if (value == null) return null;
+        StringBuilder cleaned = null;
+        for (int index = 0; index < value.length(); index++) {
+            char c = value.charAt(index);
+            if (Character.isISOControl(c)) {
+                if (cleaned == null) cleaned = new StringBuilder(value.length()).append(value, 0, index);
+                cleaned.append(' ');
+            } else if (cleaned != null) {
+                cleaned.append(c);
+            }
+        }
+        return cleaned == null ? value : cleaned.toString();
     }
 
     private static String sanitizeIdentity(String value) {

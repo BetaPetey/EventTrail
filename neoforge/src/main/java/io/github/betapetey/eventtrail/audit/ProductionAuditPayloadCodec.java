@@ -195,9 +195,11 @@ public final class ProductionAuditPayloadCodec implements AuditPayloadCodec {
         if (!payload.backingReference().equals(technicalSubject)) {
             return unavailable(action, AuditEvidence.Status.MALFORMED);
         }
+        // ItemDetails plan 1.5, the transfer branch (B1): the evidence version comes from the decoded payload, so a
+        // version 3 row reads back with evidence version 3; versions 1 and 2 keep CURRENT_VERSION as before.
         return new DecodedProjection(
                 new AuditEvidence.ContainerTransfer(
-                        ContainerTransferPayloadCodec.CURRENT_VERSION,
+                        ContainerTransferPayloadCodec.evidenceVersionOf(payload),
                         payload.direction() == TransactionDirection.DEPOSIT
                                 ? AuditEvidence.TransferDirection.DEPOSIT
                                 : AuditEvidence.TransferDirection.WITHDRAWAL,

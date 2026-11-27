@@ -1,6 +1,9 @@
 package io.github.betapetey.eventtrail.inventory.core;
 
 import io.github.betapetey.eventtrail.audit.ShownCause;
+import io.github.betapetey.eventtrail.audit.codec.CompactIO;
+import io.github.betapetey.eventtrail.util.DetailsBlob;
+import io.github.betapetey.eventtrail.util.ItemDetails;
 import net.minecraft.resources.ResourceLocation;
 
 import java.io.ByteArrayInputStream;
@@ -14,6 +17,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.Objects;
 
 /**
@@ -24,16 +28,65 @@ import java.util.Objects;
  * cause block ({@link ShownCause#writeBlock}). Nothing else decodes: any other version is UNSUPPORTED; a version 2
  * without its cause block, with a non-canonical block, or with a byte after it is MALFORMED; a version 1 with a byte
  * after backingReference is MALFORMED as before. The prefix stays {@link #PREFIX} (it names the payload family).
- * {@link #CURRENT_VERSION} stays 1, the evidence version of every row without a cause; {@link #versionOf} gives the
+ * {@link #CURRENT_VERSION} stays 1, the evidence version of every version 1 and 2 row; {@link #versionOf} gives the
  * version of a given payload.</p>
+ *
+ * <p>ItemDetails (plan 2.2, B1; the Owner's Q480 OK): a payload with a {@link ContainerTransferPayload#details()} block
+ * is version 3, a one-byte version 0x03 where versions 1 and 2 start with an int32 (first byte 0x00), then the
+ * {@link CompactIO} field forms. {@link #decode} reads a first byte 0x00 by the version 1 and 2 path above, unchanged,
+ * and any other first byte by the version 3 reader; its evidence version is {@link #DETAILS_VERSION}
+ * ({@link #evidenceVersionOf}). The prefix, the outer item and the size limits are the same for every version.</p>
  */
 public final class ContainerTransferPayloadCodec {
     public static final int CURRENT_VERSION = 1;
     /** The payload version of a row that carries a shown cause. */
     public static final int SHOWN_CAUSE_VERSION = 2;
+    /** The payload version, and the evidence version, of a row that carries an {@link ItemDetails} block. */
+    public static final int DETAILS_VERSION = 3;
+    /** Version 3's one flag: the shown-cause block follows. Bit 0x02 is reserved for H3 and refused, as is any other. */
+    public static final int FLAG_SHOWN_CAUSE = 0x01;
     public static final String PREFIX = "EVENTTRAIL_CONTAINER_TRANSFER_V1|";
     public static final int MAX_BINARY_BYTES = 72 * 1024;
     public static final int MAX_ENCODED_CHARS = 100 * 1024;
+
+    private static final int DETAILS_FLAGS = FLAG_SHOWN_CAUSE;
+    private static final int BACKING_REFERENCE_BYTES = 32;
+    private static final CompactIO.CodeTable<TransactionDirection> DIRECTION_CODES =
+            CompactIO.CodeTable.of(TransactionDirection.class, value -> switch (value) {
+                case DEPOSIT -> 1;
+                case WITHDRAWAL -> 2;
+            });
+    private static final CompactIO.CodeTable<ContainerTransferPayload.ActorState> ACTOR_CODES =
+            CompactIO.CodeTable.of(ContainerTransferPayload.ActorState.class, value -> switch (value) {
+                case PLAYER -> 1;
+                case SYNTHETIC_PLAYER -> 2;
+            });
+    private static final CompactIO.CodeTable<AccessKind> ACCESS_CODES =
+            CompactIO.CodeTable.of(AccessKind.class, value -> switch (value) {
+                case PHYSICAL -> 1;
+                case WIRED_NETWORK -> 2;
+                case WIRELESS_NETWORK -> 3;
+                case PORTABLE_MENU -> 4;
+                case DIRECT_INTERACTION -> 5;
+            });
+    /** UNKNOWN has a code so the table is total; the payload refuses it, as in versions 1 and 2. */
+    private static final CompactIO.CodeTable<BackingContextKind> BACKING_CODES =
+            CompactIO.CodeTable.of(BackingContextKind.class, value -> switch (value) {
+                case WORLD_BLOCK -> 1;
+                case COMPOUND_BLOCK -> 2;
+                case ENTITY_BOUND -> 3;
+                case ITEM_BOUND -> 4;
+                case NESTED_ITEM -> 5;
+                case PLACED_BLOCK -> 6;
+                case PLAYER_BOUND -> 7;
+                case OTHER_PLAYER_BOUND -> 8;
+                case NETWORK -> 9;
+                case SHARED_CHANNEL -> 10;
+                case PROXY -> 11;
+                case MOVING_STORE -> 12;
+                case TRASH -> 13;
+                case UNKNOWN -> 14;
+            });
 
     private ContainerTransferPayloadCodec() {}
 
@@ -44,6 +97,7 @@ public final class ContainerTransferPayloadCodec {
      */
     public static String encode(ContainerTransferPayload payload) {
         Objects.requireNonNull(payload, "payload");
+        if (payload.details() != null) return envelope(payload.itemId(), detailsBinary(payload));
         try {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             try (DataOutputStream output = new DataOutputStream(bytes)) {
@@ -95,6 +149,9 @@ public final class ContainerTransferPayloadCodec {
             return DecodeResult.failure(Status.MALFORMED);
         }
         if (binary.length > MAX_BINARY_BYTES) return DecodeResult.failure(Status.TOO_LARGE);
+        // A leading 0x00 is the int32 version of versions 1 and 2, read below as before; any other first byte is
+        // the one-byte version of the ItemDetails forms (ItemDetails plan 1.5, the transfer branch).
+        if (binary.length > 0 && binary[0] != 0) return decodeDetails(encoded, outerItem, binary);
 
         try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(binary))) {
             int version = input.readInt();
@@ -137,9 +194,107 @@ public final class ContainerTransferPayloadCodec {
         }
     }
 
-    /** The payload version {@link #encode} writes for {@code payload}: 2 with a shown cause, otherwise 1. */
+    /**
+     * The payload version {@link #encode} writes for {@code payload}: 3 with an ItemDetails block, else 2 with a shown
+     * cause, otherwise 1.
+     */
     public static int versionOf(ContainerTransferPayload payload) {
-        return Objects.requireNonNull(payload, "payload").shownCause() == null ? CURRENT_VERSION : SHOWN_CAUSE_VERSION;
+        if (Objects.requireNonNull(payload, "payload").details() != null) return DETAILS_VERSION;
+        return payload.shownCause() == null ? CURRENT_VERSION : SHOWN_CAUSE_VERSION;
+    }
+
+    /**
+     * The evidence version of a row with this payload: {@link #DETAILS_VERSION} for version 3, else
+     * {@link #CURRENT_VERSION}, which versions 1 and 2 have always had. The writer and the stored-row reader both use
+     * it, so a stored row reads back with the version it was written with.
+     */
+    public static int evidenceVersionOf(ContainerTransferPayload payload) {
+        return Objects.requireNonNull(payload, "payload").details() != null ? DETAILS_VERSION : CURRENT_VERSION;
+    }
+
+    /**
+     * Version 3 (ItemDetails plan 2.2): version byte, flags, direction code, inner itemId short string, quantity
+     * varint, the ItemDetails block with its identity, actor code, targetDisplay name string (today's int32 length,
+     * plan Q3), providerId short string, access code, backing code, backingReference as 32 raw bytes, then the shown
+     * cause block in today's form when its flag is set.
+     */
+    private static byte[] detailsBinary(ContainerTransferPayload payload) {
+        CompactIO.Writer writer = new CompactIO.Writer()
+                .version(DETAILS_VERSION)
+                .flags(payload.shownCause() != null ? FLAG_SHOWN_CAUSE : 0, DETAILS_FLAGS)
+                .code(DIRECTION_CODES, payload.direction())
+                .shortString(payload.itemId().toString(), MAX_BINARY_BYTES)
+                .varint(payload.quantity());
+        payload.details().writeTo(writer, true);
+        writer.code(ACTOR_CODES, payload.actorState())
+                .nameString(payload.targetDisplay(), MAX_BINARY_BYTES)
+                .shortString(payload.providerId(), ContainerTransferPayload.MAX_PROVIDER_CHARS)
+                .code(ACCESS_CODES, payload.accessKind())
+                .code(BACKING_CODES, payload.backingContextKind())
+                .bytes(HexFormat.of().parseHex(payload.backingReference()));
+        if (payload.shownCause() != null) {
+            ByteArrayOutputStream cause = new ByteArrayOutputStream();
+            try (DataOutputStream output = new DataOutputStream(cause)) {
+                ShownCause.writeBlock(output, payload.shownCause());
+            } catch (IOException impossible) {
+                throw new IllegalStateException("In-memory container-transfer encoding failed", impossible);
+            }
+            writer.bytes(cause.toByteArray());
+        }
+        return writer.toByteArray();
+    }
+
+    /** The same size limits and prefix as versions 1 and 2. */
+    private static String envelope(ResourceLocation itemId, byte[] binary) {
+        if (binary.length > MAX_BINARY_BYTES) {
+            throw new IllegalArgumentException("Container-transfer payload exceeds its retained-size limit");
+        }
+        String encoded = PREFIX + itemId + '|' + Base64.getUrlEncoder().withoutPadding().encodeToString(binary);
+        if (encoded.length() > MAX_ENCODED_CHARS) {
+            throw new IllegalArgumentException("Container-transfer payload exceeds its encoded-size limit");
+        }
+        return encoded;
+    }
+
+    /**
+     * Reads version 3. A first byte other than 3 is UNSUPPORTED, as any unknown version is. Every other refusal is
+     * MALFORMED: an unknown flag (the H3 bit included) or code, a field not in its writer's form, a truncated or
+     * trailing byte, an inner item other than the prefix's, a block the payload refuses (NONE; CAPTURED for another
+     * item or count; CAPTURED whose tree renders past the 64 Ki-character or UTF-8 limit, the Owner's Q480 OK, refused
+     * in the payload's constructor as today's over-long text is) and a payload that does not encode back to the same
+     * string.
+     */
+    private static DecodeResult decodeDetails(String encoded, ResourceLocation outerItem, byte[] binary) {
+        try {
+            CompactIO.Reader reader = new CompactIO.Reader(binary);
+            if (reader.version() != DETAILS_VERSION) return DecodeResult.failure(Status.UNSUPPORTED);
+            int flags = reader.flags(DETAILS_FLAGS);
+            TransactionDirection direction = reader.code(DIRECTION_CODES);
+            ResourceLocation itemId = ResourceLocation.tryParse(reader.shortString(MAX_BINARY_BYTES));
+            int quantity = reader.varint(Integer.MAX_VALUE);
+            ItemDetails details = ItemDetails.readFrom(reader, true, DetailsBlob.Limits.ITEM);
+            ContainerTransferPayload.ActorState actor = reader.code(ACTOR_CODES);
+            String targetDisplay = reader.nameString(MAX_BINARY_BYTES);
+            String providerId = reader.shortString(ContainerTransferPayload.MAX_PROVIDER_CHARS);
+            AccessKind accessKind = reader.code(ACCESS_CODES);
+            BackingContextKind backing = reader.code(BACKING_CODES);
+            String backingReference = HexFormat.of().formatHex(reader.bytes(BACKING_REFERENCE_BYTES));
+            ShownCause shownCause = null;
+            if ((flags & FLAG_SHOWN_CAUSE) != 0) {
+                DataInputStream input = new DataInputStream(new ByteArrayInputStream(reader.bytes(reader.remaining())));
+                shownCause = ShownCause.readBlock(input);
+                if (input.read() != -1) return DecodeResult.failure(Status.MALFORMED);
+            }
+            reader.requireEnd();
+            if (itemId == null || !outerItem.equals(itemId)) return DecodeResult.failure(Status.MALFORMED);
+            ContainerTransferPayload payload = new ContainerTransferPayload(
+                    direction, itemId, quantity, null, null, null,
+                    actor, targetDisplay, providerId, accessKind, backing, backingReference, shownCause, details);
+            if (!encoded.equals(encode(payload))) return DecodeResult.failure(Status.MALFORMED);
+            return DecodeResult.success(payload);
+        } catch (CompactIO.MalformedException | IOException | RuntimeException failure) {
+            return DecodeResult.failure(Status.MALFORMED);
+        }
     }
 
     private static void writeNullableString(DataOutputStream output, String value) throws IOException {

@@ -7,7 +7,8 @@ import io.github.betapetey.eventtrail.audit.AuditLocation;
 import io.github.betapetey.eventtrail.audit.AuditRecord;
 import io.github.betapetey.eventtrail.audit.AuditSubject;
 import io.github.betapetey.eventtrail.audit.ShownCause;
-import io.github.betapetey.eventtrail.util.EventTrailNbtUtil;
+import io.github.betapetey.eventtrail.util.DetailsBlob;
+import io.github.betapetey.eventtrail.util.ItemDetails;
 import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
@@ -43,8 +44,12 @@ public final class InventoryTransactionNormalizer {
 
     /**
      * As {@link #toAuditRecords(InventoryTransactionEvidence, boolean)}, with one shown cause on every chunk's payload
-     * (graves design r6, 1.4). A null cause gives the same records as the two-argument form. The evidence version stays
-     * {@link ContainerTransferPayloadCodec#CURRENT_VERSION} for both payload bodies.
+     * (graves design r6, 1.4). A null cause gives the same records as the two-argument form.
+     *
+     * <p>ItemDetails plan 1.4 (B1): each chunk's item is captured by {@link ItemDetails#capture} and written as a
+     * version 3 payload, with or without the cause, with evidence version
+     * {@link ContainerTransferPayloadCodec#DETAILS_VERSION}. {@code captureFullMetadata} false is writer pressure
+     * (BUSY), as before.</p>
      */
     public static List<AuditRecord> toAuditRecords(
             InventoryTransactionEvidence evidence,
@@ -57,12 +62,12 @@ public final class InventoryTransactionNormalizer {
         List<AuditRecord> records = new ArrayList<>();
         for (InventoryTransactionEvidence chunk : chunk(evidence)) {
             ItemStack stack = chunk.item().stackWithCount((int) chunk.quantity());
-            String serialized = EventTrailNbtUtil.stackToAuditString(stack, captureFullMetadata);
-            ContainerTransferPayload payload = ContainerTransferPayload.from(
+            ItemDetails details = ItemDetails.capture(stack, captureFullMetadata, DetailsBlob.Limits.ITEM);
+            ContainerTransferPayload payload = ContainerTransferPayload.fromDetails(
                     chunk,
                     chunk.syntheticActor(),
                     chunk.providerId(),
-                    serialized,
+                    details,
                     cause);
             records.add(AuditRecord.captureAt(
                     chunk.occurredAtEpochMillis(),
@@ -83,7 +88,7 @@ public final class InventoryTransactionNormalizer {
                             payload.backingReference(),
                             chunk.target().label()),
                     new AuditEvidence.ContainerTransfer(
-                            ContainerTransferPayloadCodec.CURRENT_VERSION,
+                            ContainerTransferPayloadCodec.evidenceVersionOf(payload),
                             chunk.direction() == TransactionDirection.DEPOSIT
                                     ? AuditEvidence.TransferDirection.DEPOSIT
                                     : AuditEvidence.TransferDirection.WITHDRAWAL,
